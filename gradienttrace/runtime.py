@@ -30,8 +30,10 @@ def detect_runtime() -> Runtime:
             kind="tpu",
             name=tpu_name,
             precision="bf16",
-            micro_bs=8,
-            grad_accum=8,
+            # v5e-1 has 16GB; micro 4 is the batch the TPU smoke run verifies,
+            # and accum keeps the effective batch at 64.
+            micro_bs=4,
+            grad_accum=16,
             workers=0,
             pad_to_max=True,
         )

@@ -49,7 +49,8 @@ hub:
   model_id: Yashhh999/gradientTrace
   push: false
   private: false
-  checkpoint_strategy: every_save     # every_save | end | all_checkpoints
+  checkpoint_strategy: checkpoint     # checkpoint = newest complete checkpoint at last-checkpoint/
+                                      # (resumable across sessions); others: end | every_save | all_checkpoints
 
 wandb:
   enabled: false

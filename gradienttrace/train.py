@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -35,7 +36,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the gradientTrace AI-text detector")
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--smoke", action="store_true", help="network-free synthetic run to verify the pipeline")
-    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--max-steps", type=int, default=None, help="stop after this many optimizer steps; with --resume the count starts at the checkpoint's step")
+    parser.add_argument("--save-steps", type=int, default=0, help="checkpoint + eval every N optimizer steps (0 = config strategies)")
     parser.add_argument("--epochs", type=float, default=None)
     parser.add_argument("--backbone", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -117,6 +119,7 @@ def _build_training_args(
     push: bool,
     hub_id: str,
     train_size: int,
+    save_every: int = 0,
 ):
     from transformers import TrainingArguments
 
@@ -151,8 +154,11 @@ def _build_training_args(
         kwargs["hub_model_id"] = hub_id
         kwargs["hub_private_repo"] = cfg.hub.private
     if steps_mode:
-        step = 15 if max_steps <= 100 else max(50, max_steps // 10)
+        step = save_every or (15 if max_steps <= 100 else max(50, max_steps // 10))
         kwargs.update(save_strategy="steps", save_steps=step, eval_steps=step)
+        eval_strategy = "steps"
+    elif save_every > 0:
+        kwargs.update(save_strategy="steps", save_steps=save_every, eval_steps=save_every)
         eval_strategy = "steps"
     else:
         kwargs["save_strategy"] = cfg.train.save_strategy
@@ -221,11 +227,79 @@ def _build_trainer(model, tokenizer, train_ds, val_ds, train_args, cfg: Config):
     return Trainer(**trainer_kwargs)
 
 
+def _session_max_steps(checkpoint: str | None, max_steps: int) -> int:
+    """With --resume, --max-steps counts steps added this session, not total steps."""
+    if not checkpoint or max_steps <= 0:
+        return max_steps
+    try:
+        state = json.loads((Path(checkpoint) / "trainer_state.json").read_text(encoding="utf-8"))
+        return max_steps + int(state.get("global_step") or 0)
+    except (OSError, ValueError, TypeError):
+        return max_steps
+
+
 def _fmt(value, spec: str = ".4f") -> str:
     try:
         return format(float(value), spec)
     except (TypeError, ValueError):
         return "n/a"
+
+
+_CHECKPOINT_RE = re.compile(r"^checkpoint-(\d+)$")
+
+
+def _latest_local_checkpoint(output_dir: Path) -> Path | None:
+    found = []
+    for child in output_dir.glob("checkpoint-*"):
+        match = _CHECKPOINT_RE.match(child.name)
+        if match and child.is_dir():
+            found.append((int(match.group(1)), child))
+    return max(found)[1] if found else None
+
+
+def _resolve_resume(cfg: Config, hub_id: str, hf_token: str | None) -> str | None:
+    """Newest local checkpoint, else the newest one Trainer pushed to the Hub.
+
+    With `hub_strategy="checkpoint"` the latest complete Trainer checkpoint sits
+    at `last-checkpoint/`, optimizer and scheduler included, so a fresh Colab
+    session can continue a run that died with the old VM. `checkpoint-<step>/`
+    directories (all_checkpoints strategy) are also accepted.
+    """
+    local = _latest_local_checkpoint(Path(cfg.train.output_dir))
+    if local is not None:
+        LOG.info("resume: local checkpoint %s", local)
+        return str(local)
+    if not hub_id:
+        LOG.warning("resume: no local checkpoint and no hub_model_id; starting fresh")
+        return None
+    from huggingface_hub import HfApi, snapshot_download
+
+    try:
+        names = HfApi(token=hf_token).list_repo_files(hub_id, repo_type="model")
+    except Exception as exc:
+        LOG.warning("resume: no local checkpoint and %s is unreachable (%r); starting fresh", hub_id, exc)
+        return None
+    steps = sorted(
+        int(match.group(1))
+        for name in names
+        if (match := _CHECKPOINT_RE.match(name.split("/")[0]))
+    )
+    if any(name.split("/")[0] == "last-checkpoint" for name in names):
+        target = "last-checkpoint"
+    elif steps:
+        target = f"checkpoint-{steps[-1]}"
+    else:
+        LOG.warning("resume: no last-checkpoint/ or checkpoint-* in %s; starting fresh", hub_id)
+        return None
+    LOG.info("resume: downloading %s/%s", hub_id, target)
+    snapshot = Path(
+        snapshot_download(hub_id, repo_type="model", token=hf_token, allow_patterns=[f"{target}/*"])
+    )
+    checkpoint = snapshot / target
+    if not (checkpoint / "trainer_state.json").exists():
+        LOG.warning("resume: %s/%s has no trainer_state.json; starting fresh", hub_id, target)
+        return None
+    return str(checkpoint)
 
 
 def _model_card(cfg: Config, report: dict, runtime: Runtime) -> str:
@@ -346,12 +420,22 @@ def main(argv=None) -> int:
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
+    resume_ckpt = _resolve_resume(cfg, hub_id, hf_token) if args.resume else None
+    max_steps = _session_max_steps(resume_ckpt, max_steps)
+
     train_args = _build_training_args(
-        cfg, runtime, max_steps, steps_mode, push, hub_id, train_size=len(train_ds)
+        cfg,
+        runtime,
+        max_steps,
+        steps_mode,
+        push,
+        hub_id,
+        train_size=len(train_ds),
+        save_every=args.save_steps,
     )
     trainer = _build_trainer(model, tokenizer, train_ds, val_ds, train_args, cfg)
 
-    trainer.train(**({"resume_from_checkpoint": True} if args.resume else {}))
+    trainer.train(resume_from_checkpoint=resume_ckpt)
 
     output_dir = Path(cfg.train.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

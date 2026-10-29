@@ -5,7 +5,12 @@
 RUN = "smoke"                        # "smoke" (~10 min sanity) | "full" (real training)
 HUB_ID = "Yashhh999/gradientTrace"   # HF model repo to receive checkpoints
 PUSH_SMOKE = False                   # also push the smoke model to "<HUB_ID>-smoke"
-RESUME = False                       # resume from the last local checkpoint
+MAX_STEPS = 600                      # full run: stop after this many optimizer steps per session
+                                     # (~2.5-3 h on v5e-1; RESUME keeps counting from the checkpoint)
+                                     # 0 = all EPOCHS, bounded only by Colab's session limit
+SAVE_EVERY = 300                     # full run: checkpoint + eval every N steps, pushed to the Hub
+EPOCHS = None                        # None = config (3); e.g. 1 for a single full-data pass
+RESUME = False                       # continue from the newest checkpoint: local first, else the Hub
 
 import os, shutil, subprocess, sys
 
@@ -172,6 +177,13 @@ cmd = [sys.executable, "-m", "gradienttrace.train", "--config", "configs/base.ya
        "--hub-model-id", hub]
 if RUN == "smoke":
     cmd += ["--smoke", "--max-steps", "40"]
+else:
+    if MAX_STEPS:
+        cmd += ["--max-steps", str(MAX_STEPS)]
+    if SAVE_EVERY:
+        cmd += ["--save-steps", str(SAVE_EVERY)]
+    if EPOCHS:
+        cmd += ["--epochs", str(EPOCHS)]
 if push:
     assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN (write scope) to Colab Secrets to push checkpoints."
     cmd.append("--push-to-hub")

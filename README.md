@@ -88,7 +88,12 @@ python -m gradienttrace.evaluate --model runs/gradientTrace --config configs/bas
 RUN = "smoke"                        # "smoke" (~10 min sanity) | "full" (real training)
 HUB_ID = "Yashhh999/gradientTrace"   # HF model repo to receive checkpoints
 PUSH_SMOKE = False                   # also push the smoke model to "<HUB_ID>-smoke"
-RESUME = False                       # resume from the last local checkpoint
+MAX_STEPS = 600                      # full run: stop after this many optimizer steps per session
+                                     # (~2.5-3 h on v5e-1; RESUME keeps counting from the checkpoint)
+                                     # 0 = all EPOCHS, bounded only by Colab's session limit
+SAVE_EVERY = 300                     # full run: checkpoint + eval every N steps, pushed to the Hub
+EPOCHS = None                        # None = config (3); e.g. 1 for a single full-data pass
+RESUME = False                       # continue from the newest checkpoint: local first, else the Hub
 
 import os, shutil, subprocess, sys
 
@@ -255,6 +260,13 @@ cmd = [sys.executable, "-m", "gradienttrace.train", "--config", "configs/base.ya
        "--hub-model-id", hub]
 if RUN == "smoke":
     cmd += ["--smoke", "--max-steps", "40"]
+else:
+    if MAX_STEPS:
+        cmd += ["--max-steps", str(MAX_STEPS)]
+    if SAVE_EVERY:
+        cmd += ["--save-steps", str(SAVE_EVERY)]
+    if EPOCHS:
+        cmd += ["--epochs", str(EPOCHS)]
 if push:
     assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN (write scope) to Colab Secrets to push checkpoints."
     cmd.append("--push-to-hub")
@@ -266,13 +278,23 @@ run(cmd)
 print("[gradientTrace] done" + (f" -> https://huggingface.co/{hub}" if push else " (local run, no push)"))
 ```
 
-This file is also at [`colab/one_shot.py`](colab/one_shot.py). Two Colab-TPU
-constraints shape the cell: `torch_xla`'s `_XLAC` extension must be the build
-compiled for the installed torch (otherwise it dies on `undefined symbol`), and
-the kernel must not import torch on TPU, because that initializes libtpu in the
-kernel and the training subprocess can then no longer claim the chip. The smoke
-run is network-free (synthetic paired data) and verifies data, training,
-evaluation, and optional Hub upload end to end before you spend GPU/TPU hours.
+This file is also at [`colab/one_shot.py`](colab/one_shot.py). Three Colab-TPU
+constraints shape the cell: the native `torch_tpu` backend only loads a compiled
+extension built for torch 2.11-2.15, a leftover `torch_xla` would take over
+detection and drag in a libtpu too old for it (so the cell removes it and
+restores the libtpu `torch_tpu` declares), and the kernel must not import torch
+on TPU, because that initializes libtpu in the kernel and the training
+subprocess can then no longer claim the chip. The smoke run is network-free
+(synthetic paired data) and verifies data, training, evaluation, and optional Hub
+upload end to end before you spend GPU/TPU hours.
+
+A full 3-epoch run over 150k samples outlasts one Colab TPU session. `SAVE_EVERY`
+checkpoints and evaluates every N optimizer steps and each save is pushed to the
+Hub, so a killed VM loses at most that window; re-running the cell with
+`RESUME = True` continues from the newest local checkpoint or, on a fresh VM,
+from `last-checkpoint/` on the Hub (optimizer and scheduler state included).
+`MAX_STEPS` optionally bounds a single session; on resume it counts additional
+steps from the checkpoint.
 
 ## Training configuration (defaults)
 
@@ -282,7 +304,7 @@ evaluation, and optional Hub upload end to end before you spend GPU/TPU hours.
 | weight decay | 0.01 | regularization |
 | head dropout | 0.1 | regularize the classifier, not the pretrained encoder |
 | max_length | 512 | DeBERTa-v3 position limit |
-| batch | 8x8 (TPU) / 16x4 (T4) = 64 | fits 16GB, DDP/XLA-safe |
+| batch | 4x16 (TPU) / 16x4 (T4) = 64 | fits the 16GB v5e-1, DDP/XLA-safe |
 | precision | bf16 on TPU/Ampere+, fp16+GradScaler on T4 | T4 (Turing) has no bf16 |
 | eval/save | per epoch, keep 2 | `load_best_model_at_end` on val AUROC |
 | early stopping | patience 2 on AUROC | the real anti-overfitting lever |

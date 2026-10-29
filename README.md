@@ -156,7 +156,33 @@ if is_tpu:
     # transformers and accelerate take the XLA code path instead of the native
     # TPU backend, and its _XLAC.so is ABI-locked to a torch build that no
     # longer exists here (undefined symbol on import).
+    had_xla = installed("torch_xla") is not None
     run("pip -q uninstall -y torch_xla", check=False)
+
+    # Installing torch_xla also downgraded libtpu (2.8.0 pins 0.0.17), whose
+    # PJRT plugin is too old for the image's torch_tpu client: creating the
+    # PjRt client dies on "Unexpected option name ... premapped_buffer_size".
+    # Restore the libtpu torch_tpu declares, else the newest published one.
+    from importlib.metadata import requires
+    from packaging.requirements import Requirement
+
+    libtpu_req = None
+    try:
+        for raw in requires("torch_tpu") or []:
+            req = Requirement(raw)
+            if req.name.replace("_", "-").lower() == "libtpu":
+                libtpu_req = req
+                break
+    except Exception:
+        pass
+    libtpu_v = installed("libtpu")
+    if libtpu_req is not None and str(libtpu_req.specifier):
+        if libtpu_v is None or not libtpu_req.specifier.contains(libtpu_v, prereleases=True):
+            print(f"[gradientTrace] libtpu {libtpu_v} -> {libtpu_req.specifier} (required by torch_tpu)")
+            run(f"pip -q install 'libtpu{libtpu_req.specifier}'", check=False)
+    elif had_xla:
+        print(f"[gradientTrace] torch_xla pinned libtpu {libtpu_v}; restoring the newest libtpu")
+        run("pip -q install -U libtpu", check=False)
 
     # The native torch_tpu backend loads the compiled extension matching the
     # running torch; extensions ship for torch 2.11-2.15. 2.14.1 is the build
@@ -188,18 +214,30 @@ if is_tpu:
 
     # Do NOT import torch in this kernel: on TPU that claims the chip and the
     # training child can then no longer initialize libtpu. Verify in a
-    # short-lived child instead, through the same detection training uses.
-    run(
-        [
-            sys.executable,
-            "-c",
-            "from gradienttrace.runtime import detect_runtime;"
-            "r = detect_runtime();"
-            "assert r.kind == 'tpu', f'expected the native TPU backend, got {r}';"
-            "print('[gradientTrace]', r.name, '| precision', r.precision,"
-            " '| micro_batch', r.micro_bs, 'x accum', r.grad_accum)",
-        ]
-    )
+    # short-lived child instead: detection, a manual seed (the first call that
+    # creates the PjRt client) and a real device op, so a bad libtpu fails here
+    # instead of half-way through Trainer setup.
+    try:
+        run(
+            [
+                sys.executable,
+                "-c",
+                "from gradienttrace.runtime import detect_runtime;"
+                "import torch; import importlib.metadata as md;"
+                "r = detect_runtime();"
+                "assert r.kind == 'tpu', f'expected the native TPU backend, got {r}';"
+                "torch.manual_seed(0);"
+                "total = float(torch.ones(8, device='tpu:0').sum());"
+                "print('[gradientTrace]', r.name, '| precision', r.precision,"
+                " '| micro_batch', r.micro_bs, 'x accum', r.grad_accum,"
+                " '| libtpu', md.version('libtpu'), '| device op ok:', total)",
+            ]
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"{exc}\nIf the error mentions a PjRt/libtpu mismatch, restart the runtime "
+            "(Runtime > Restart session) and re-run this cell."
+        ) from exc
     print(f"[gradientTrace] torch {torch_v} | native torch_tpu | torch_xla removed")
 else:
     import torch

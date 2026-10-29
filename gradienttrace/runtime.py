@@ -71,8 +71,12 @@ def _xla_requested() -> bool:
         import torch_xla  # noqa: F401
 
         return True
-    except Exception:
-        return False
+    except Exception as exc:
+        raise RuntimeError(
+            "TPU/PJRT environment detected but torch_xla failed to import. "
+            "torch_xla's compiled extension is ABI-locked to torch, so install "
+            "the torch_xla build that matches the installed torch."
+        ) from exc
 
 
 def resolve_device(runtime: Runtime):

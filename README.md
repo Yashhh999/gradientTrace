@@ -113,36 +113,52 @@ os.chdir(REPO_DIR)
 subprocess.run("pip -q install -r requirements.txt", shell=True, check=True)
 
 if is_tpu:
-    subprocess.run("pip -q install 'torch_xla[tpu]' -f https://storage.googleapis.com/libtpu-releases/index.html", shell=True, check=True)
     os.environ.setdefault("PJRT_DEVICE", "TPU")
-
-import torch, transformers
-if not is_tpu:
+    from importlib.metadata import PackageNotFoundError, version
+    torch_base = version("torch").split("+")[0]
+    try:
+        xla_base = version("torch_xla").split("+")[0]
+    except PackageNotFoundError:
+        xla_base = None
+    if xla_base != torch_base:   # _XLAC.so is ABI-locked to one torch build
+        print(f"torch_xla {xla_base} != torch {torch_base}; aligning")
+        result = subprocess.run(
+            f"pip -q install 'torch_xla[tpu]=={torch_base}' -f https://storage.googleapis.com/libtpu-releases/index.html",
+            shell=True,
+        )
+        if result.returncode != 0 and xla_base:
+            result = subprocess.run(f"pip -q install 'torch=={xla_base}'", shell=True)
+        if result.returncode != 0:
+            subprocess.run("pip -q install 'torch_xla[tpu]' -f https://storage.googleapis.com/libtpu-releases/index.html", shell=True, check=True)
+        torch_base, xla_base = version("torch").split("+")[0], version("torch_xla").split("+")[0]
+        if xla_base != torch_base:
+            print(f"WARNING: torch {torch_base} vs torch_xla {xla_base} still differ")
+    print(f"torch {version('torch')} | torch_xla {version('torch_xla')} | tpu=True")
+else:
+    import torch, transformers
     assert torch.cuda.is_available(), "Select a GPU or TPU runtime."
-print(f"torch {torch.__version__} | transformers {transformers.__version__} | tpu={is_tpu}")
+    print(f"torch {torch.__version__} | transformers {transformers.__version__} | tpu=False")
 
 push = RUN == "full" or PUSH_SMOKE
 hub = HUB_ID if RUN == "full" else HUB_ID + "-smoke"
-argv = ["--config", "configs/base.yaml", "--hub-model-id", hub]
+cmd = [sys.executable, "-m", "gradienttrace.train", "--config", "configs/base.yaml", "--hub-model-id", hub]
 if RUN == "smoke":
-    argv += ["--smoke", "--max-steps", "40"]
+    cmd += ["--smoke", "--max-steps", "40"]
 if push:
     assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN to Colab Secrets."
-    argv.append("--push-to-hub")
+    cmd.append("--push-to-hub")
 if RESUME:
-    argv.append("--resume")
-
-sys.path.insert(0, REPO_DIR)
-from gradienttrace.train import main as train_main
-train_main(argv)   # in-process: the Colab TPU kernel already owns the chip
+    cmd.append("--resume")
+subprocess.run(cmd, check=True, env=dict(os.environ, PYTHONUNBUFFERED="1"))
 ```
 
-This file is also at [`colab/one_shot.py`](colab/one_shot.py). Training runs in
-the kernel process on purpose: on Colab TPU a spawned `python -m gradienttrace.train`
-child inherits `PJRT_DEVICE=TPU` but cannot claim a chip the kernel already
-initialized, and exits silently with status 1. The smoke run is network-free
-(synthetic paired data) and verifies data, training, evaluation, and optional
-Hub upload end to end before you spend GPU/TPU hours.
+This file is also at [`colab/one_shot.py`](colab/one_shot.py). Two Colab-TPU
+constraints shape the cell: `torch_xla`'s `_XLAC` extension must be the build
+compiled for the installed torch (otherwise it dies on `undefined symbol`), and
+the kernel must not import torch on TPU, because that initializes libtpu in the
+kernel and the training subprocess can then no longer claim the chip. The smoke
+run is network-free (synthetic paired data) and verifies data, training,
+evaluation, and optional Hub upload end to end before you spend GPU/TPU hours.
 
 ## Training configuration (defaults)
 

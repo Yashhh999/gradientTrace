@@ -39,43 +39,61 @@ os.chdir(REPO_DIR)
 subprocess.run("pip -q install -r requirements.txt", shell=True, check=True)
 
 if is_tpu:
-    print("[gradientTrace] TPU runtime detected: installing torch_xla")
-    subprocess.run(
-        "pip -q install 'torch_xla[tpu]' -f https://storage.googleapis.com/libtpu-releases/index.html",
-        shell=True,
-        check=True,
-    )
     os.environ.setdefault("PJRT_DEVICE", "TPU")
+    from importlib.metadata import PackageNotFoundError, version
 
-import torch
-import transformers
+    torch_base = version("torch").split("+")[0]
+    try:
+        xla_base = version("torch_xla").split("+")[0]
+    except PackageNotFoundError:
+        xla_base = None
+    if xla_base != torch_base:
+        # _XLAC.so is ABI-locked to one torch build: a mismatched wheel fails on
+        # `import _XLAC` with "undefined symbol" and takes transformers down too.
+        print(f"[gradientTrace] torch_xla {xla_base} does not match torch {torch_base}; aligning")
+        result = subprocess.run(
+            f"pip -q install 'torch_xla[tpu]=={torch_base}' "
+            "-f https://storage.googleapis.com/libtpu-releases/index.html",
+            shell=True,
+        )
+        if result.returncode != 0 and xla_base:
+            result = subprocess.run(f"pip -q install 'torch=={xla_base}'", shell=True)
+        if result.returncode != 0:
+            subprocess.run(
+                "pip -q install 'torch_xla[tpu]' "
+                "-f https://storage.googleapis.com/libtpu-releases/index.html",
+                shell=True,
+                check=True,
+            )
+        torch_base = version("torch").split("+")[0]
+        xla_base = version("torch_xla").split("+")[0]
+        if xla_base != torch_base:
+            print(f"[gradientTrace] WARNING: torch {torch_base} vs torch_xla {xla_base} still differ")
+    print(f"[gradientTrace] torch {version('torch')} | torch_xla {version('torch_xla')} | tpu=True")
+    # Do NOT import torch in this kernel: on TPU that initializes libtpu here,
+    # and the training subprocess then cannot claim the chip (silent exit 1).
+else:
+    import torch
+    import transformers
 
-if not is_tpu:
     assert torch.cuda.is_available(), "Select a GPU or TPU runtime: Runtime > Change runtime type."
-print(f"[gradientTrace] torch {torch.__version__} | transformers {transformers.__version__} | tpu={is_tpu}")
+    print(f"[gradientTrace] torch {torch.__version__} | transformers {transformers.__version__} | tpu=False")
 
 # Optional: attach prompt-paired frontier/humanized data stored on Drive
 #   shutil.copy("/content/drive/MyDrive/gradientTrace/local.jsonl", "data/local.jsonl")
 
 push = RUN == "full" or PUSH_SMOKE
 hub = HUB_ID if RUN == "full" else HUB_ID + "-smoke"
-argv = ["--config", "configs/base.yaml", "--hub-model-id", hub]
+cmd = [sys.executable, "-m", "gradienttrace.train", "--config", "configs/base.yaml",
+       "--hub-model-id", hub]
 if RUN == "smoke":
-    argv += ["--smoke", "--max-steps", "40"]
+    cmd += ["--smoke", "--max-steps", "40"]
 if push:
     assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN (write scope) to Colab Secrets to push checkpoints."
-    argv.append("--push-to-hub")
+    cmd.append("--push-to-hub")
 if RESUME:
-    argv.append("--resume")
+    cmd.append("--resume")
 
-# Train in this process. On TPU a child process inherits PJRT_DEVICE=TPU but the
-# kernel already owns the chip, so `python -m gradienttrace.train` dies silently
-# with exit code 1. Running main() here keeps the initialized runtime.
-sys.path.insert(0, REPO_DIR)
-from gradienttrace.train import main as train_main
-
-print("[gradientTrace] python -m gradienttrace.train", " ".join(argv))
-code = train_main(argv)
+print("[gradientTrace]", " ".join(cmd))
+subprocess.run(cmd, check=True, env=dict(os.environ, PYTHONUNBUFFERED="1"))
 print("[gradientTrace] done" + (f" -> https://huggingface.co/{hub}" if push else " (local run, no push)"))
-if code:
-    raise SystemExit(code)

@@ -9,6 +9,27 @@ RESUME = False                       # resume from the last local checkpoint
 
 import os, shutil, subprocess, sys
 
+
+def run(command, check=True):
+    """Stream a child's output through the kernel; Colab sometimes hides raw child fds."""
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    with subprocess.Popen(
+        command,
+        shell=isinstance(command, str),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    ) as proc:
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+        proc.wait()
+    if check and proc.returncode:
+        raise RuntimeError(f"command failed with exit {proc.returncode}: {command}")
+    return proc.returncode
+
+
 try:  # Colab secrets -> env
     from google.colab import userdata
 
@@ -36,42 +57,51 @@ if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
 else:  # keep runs/ so RESUME works
     subprocess.run(f"git -C {REPO_DIR} pull --ff-only", shell=True, check=True)
 os.chdir(REPO_DIR)
-subprocess.run("pip -q install -r requirements.txt", shell=True, check=True)
+run("pip -q install -r requirements.txt")
 
 if is_tpu:
     os.environ.setdefault("PJRT_DEVICE", "TPU")
     from importlib.metadata import PackageNotFoundError, version
 
-    torch_base = version("torch").split("+")[0]
-    try:
-        xla_base = version("torch_xla").split("+")[0]
-    except PackageNotFoundError:
-        xla_base = None
-    if xla_base != torch_base:
-        # _XLAC.so is ABI-locked to one torch build: a mismatched wheel fails on
+    def versions():
+        try:
+            return version("torch").split("+")[0], version("torch_xla").split("+")[0]
+        except PackageNotFoundError:
+            return version("torch").split("+")[0], None
+
+    torch_v, xla_v = versions()
+    if xla_v != torch_v:
+        # _XLAC.so is ABI-locked to one torch build: a mismatched wheel dies on
         # `import _XLAC` with "undefined symbol" and takes transformers down too.
-        print(f"[gradientTrace] torch_xla {xla_base} does not match torch {torch_base}; aligning")
-        result = subprocess.run(
-            f"pip -q install 'torch_xla[tpu]=={torch_base}' "
+        print(f"[gradientTrace] torch {torch_v} / torch_xla {xla_v} mismatch; aligning")
+        run(
+            f"pip -q install 'torch_xla[tpu]=={torch_v}' "
             "-f https://storage.googleapis.com/libtpu-releases/index.html",
-            shell=True,
+            check=False,
         )
-        if result.returncode != 0 and xla_base:
-            result = subprocess.run(f"pip -q install 'torch=={xla_base}'", shell=True)
-        if result.returncode != 0:
-            subprocess.run(
-                "pip -q install 'torch_xla[tpu]' "
-                "-f https://storage.googleapis.com/libtpu-releases/index.html",
-                shell=True,
-                check=True,
-            )
-        torch_base = version("torch").split("+")[0]
-        xla_base = version("torch_xla").split("+")[0]
-        if xla_base != torch_base:
-            print(f"[gradientTrace] WARNING: torch {torch_base} vs torch_xla {xla_base} still differ")
+        torch_v, xla_v = versions()
+    if xla_v != torch_v and xla_v:
+        print(f"[gradientTrace] no torch_xla build for torch {torch_v}; trying the latest torch_xla")
+        run(
+            "pip -q install -U 'torch_xla[tpu]' "
+            "-f https://storage.googleapis.com/libtpu-releases/index.html",
+            check=False,
+        )
+        torch_v, xla_v = versions()
+    if xla_v != torch_v and xla_v:
+        print(f"[gradientTrace] installing torch=={xla_v} to match torch_xla")
+        run(
+            f"pip -q install 'torch=={xla_v}' --no-deps "
+            "--index-url https://download.pytorch.org/whl/cpu",
+            check=False,
+        )
+        run(f"pip -q install 'torch=={xla_v}' --no-deps", check=False)
+        torch_v, xla_v = versions()
+    if xla_v != torch_v:
+        raise RuntimeError(f"torch {torch_v} and torch_xla {xla_v} could not be aligned; see pip output above")
     print(f"[gradientTrace] torch {version('torch')} | torch_xla {version('torch_xla')} | tpu=True")
     # Do NOT import torch in this kernel: on TPU that initializes libtpu here,
-    # and the training subprocess then cannot claim the chip (silent exit 1).
+    # and the training subprocess then cannot claim the chip.
 else:
     import torch
     import transformers
@@ -95,5 +125,5 @@ if RESUME:
     cmd.append("--resume")
 
 print("[gradientTrace]", " ".join(cmd))
-subprocess.run(cmd, check=True, env=dict(os.environ, PYTHONUNBUFFERED="1"))
+run(cmd)
 print("[gradientTrace] done" + (f" -> https://huggingface.co/{hub}" if push else " (local run, no push)"))

@@ -38,9 +38,9 @@ def run(command, check=True):
 
 
 try:  # Kaggle secrets -> env
-    from kaggle_secrets import UserSecretClient
+    from kaggle_secrets import UserSecretsClient
 
-    client = UserSecretClient()
+    client = UserSecretsClient()
     for key in ("HF_TOKEN", "WANDB_API_KEY"):
         try:
             value = client.get_secret(key)
@@ -49,7 +49,7 @@ try:  # Kaggle secrets -> env
         if value:
             os.environ[key] = value
 except ImportError:
-    pass
+    print("[gradientTrace] kaggle_secrets unavailable; using env vars only")
 
 try:  # Kaggle silently blocks the clone/HF download when Internet is off
     socket.create_connection(("huggingface.co", 443), timeout=10).close()

@@ -7,6 +7,7 @@ Samples from `held_out_generators` never enter training; they form the OOD test.
 Source schema:
   hc3          Hello-SimpleAI/HC3 (question + human_answers + chatgpt_answers)
   pile         artem9k/ai-text-detection-pile (text + source)
+  arena        lmarena-ai/arena-human-preference-55k (model_a/model_b + response_a/b)
   local_jsonl  data/local.jsonl with keys:
                {text, label(0|1), generator?, prompt?, domain?, variant?, bucket?}
   hf:<org/name>[:split]   generic adapter: finds text/label/generator/prompt columns
@@ -31,6 +32,9 @@ _WS = re.compile(r"\s+")
 # HC3 ships only a loading script, which datasets 4+ refuses; all.jsonl holds the
 # same rows with the script's column names.
 _HC3_JSONL = "https://huggingface.co/datasets/Hello-SimpleAI/HC3/resolve/main/all.jsonl"
+# The only public source we have of text labelled by frontier generator: each
+# arena conversation names the model behind each side.
+_ARENA = "lmarena-ai/arena-human-preference-55k"
 
 
 @dataclass
@@ -113,6 +117,39 @@ def load_pile(cfg: Config, scan_limit: int) -> Iterator[Sample]:
             "pile",
             domain="web",
         )
+
+
+def _turns(value) -> list[str]:
+    """Arena CSV exports conversations as JSON-list strings, one item per turn."""
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return [value]
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, str)]
+    return [parsed] if isinstance(parsed, str) else []
+
+
+def load_arena(cfg: Config, scan_limit: int) -> Iterator[Sample]:
+    from datasets import load_dataset
+
+    ds = load_dataset(_ARENA, split="train", streaming=True)
+    for i, row in enumerate(ds):
+        if i >= scan_limit:
+            return
+        first_prompt = next(iter(_turns(row.get("prompt"))), "")
+        for side in ("a", "b"):
+            model = str(row.get(f"model_{side}") or "").strip().lower()
+            if not model:
+                continue
+            for turn in _turns(row.get(f"response_{side}")):
+                yield Sample(
+                    norm_text(turn), 1, model, "arena", prompt=first_prompt, domain="chat"
+                )
 
 
 def load_local_jsonl(cfg: Config, scan_limit: int) -> Iterator[Sample]:
@@ -228,6 +265,8 @@ def _make_loader(spec: str, cfg: Config):
         return load_hc3
     if spec == "pile":
         return load_pile
+    if spec == "arena":
+        return load_arena
     if spec == "local_jsonl":
         return load_local_jsonl
     if spec.startswith("hf:"):

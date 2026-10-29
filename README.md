@@ -49,11 +49,13 @@ documents) is a config change, not a code change.
 | bucket | weight | sources | purpose |
 |---|---|---|---|
 | `human` | 0.40 | HC3 human answers, `artem9k/ai-text-detection-pile` (human rows), your own paired data | natural, variable human writing |
-| `ai_foundational` | 0.40 | HC3 ChatGPT answers, pile model rows, any `hf:` source | baseline machine signature |
-| `ai_frontier` | 0.20 | **your own prompt-paired API outputs in `data/local.jsonl`** | modern reasoning-model patterns |
+| `ai_foundational` | 0.40 | HC3 ChatGPT answers, pile model rows, `yaful/MAGE`, any `hf:` source | baseline machine signature |
+| `ai_frontier` | 0.20 | `lmarena-ai/arena-human-preference-55k` (`model_a`/`model_b`), plus your own paired outputs in `data/local.jsonl` | modern reasoning-model patterns |
 
-The trainer loads what exists, logs what failed, and warns loudly if the frontier
-slice is missing. You can add any Hub dataset with `hf:org/name:split` (columns
+The arena source is what makes the OOD test non-empty: `held_out_generators`
+(llama-2, mistral, gemini) appear there with generator labels, so they are routed
+to `test_ood_generators` instead of training. The trainer loads what exists, logs
+what failed, and warns loudly if the frontier slice is missing. You can add any Hub dataset with `hf:org/name:split` (columns
 are auto-detected: text/generation, label/is_ai, model/generator, prompt/question).
 
 ### `data/local.jsonl` schema (frontier + humanized data)

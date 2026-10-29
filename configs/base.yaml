@@ -40,7 +40,9 @@ data:
   max_humanized_frac: 0.25            # cap on paraphrased/humanized AI text inside training
   held_out_generators: [llama-2, mistral, gemini]   # never trained on; OOD test only
   frontier_patterns: [gpt-4, gpt-5, gpt4, o1, o3, claude, gemini, grok, llama-3, llama3, mistral-large, deepseek, qwen, command-r]
-  sources: [hc3, pile, local_jsonl]   # or hf:<org/name>[:split] for any hub dataset
+  # arena is the only public generator-labelled frontier text (model_a/model_b);
+  # MAGE tops up ai_foundational across domains. Both stream from the hub.
+  sources: [hc3, pile, hf:yaful/MAGE, arena, local_jsonl]   # or hf:<org/name>[:split] for any hub dataset
   local_jsonl: data/local.jsonl       # prompt-paired frontier/humanized data goes here
   scan_limit_per_source: 400000
   ood_cap: 8000

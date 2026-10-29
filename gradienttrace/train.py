@@ -419,6 +419,11 @@ def main(argv=None) -> int:
         len(bundle.val),
         {name: len(items) for name, items in bundle.slices.items()},
     )
+    LOG.info(
+        "data mix: buckets=%s sources=%s",
+        bundle.manifest.get("train_buckets"),
+        bundle.manifest.get("sources"),
+    )
 
     tokenizer = build_tokenizer(cfg.backbone)
     train_ds = tokenize_for_training(

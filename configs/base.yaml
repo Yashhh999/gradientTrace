@@ -48,7 +48,7 @@ data:
 hub:
   model_id: Yashhh999/gradientTrace
   push: false
-  private: false
+  private: true                       # Yashhh999/gradientTrace exists as a private repo
   checkpoint_strategy: checkpoint     # checkpoint = newest complete checkpoint at last-checkpoint/
                                       # (resumable across sessions); others: end | every_save | all_checkpoints
 

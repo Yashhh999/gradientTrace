@@ -66,10 +66,10 @@ def _xla_requested() -> bool:
         or os.environ.get("TPU_NAME")
     ):
         return False
+    os.environ.setdefault("PJRT_DEVICE", "TPU")  # must be set before torch_xla is imported
     try:
         import torch_xla  # noqa: F401
 
-        os.environ.setdefault("PJRT_DEVICE", "TPU")
         return True
     except Exception:
         return False

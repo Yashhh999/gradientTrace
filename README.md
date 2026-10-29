@@ -103,15 +103,18 @@ except ImportError:
 is_tpu = bool(os.environ.get("COLAB_TPU_ADDR") or os.environ.get("PJRT_DEVICE") == "TPU")
 
 REPO_DIR = "/content/gradientTrace"
-if os.path.isdir(REPO_DIR):
-    shutil.rmtree(REPO_DIR)
-subprocess.run(f"git clone --depth 1 https://github.com/Yashhh999/gradientTrace.git {REPO_DIR}", shell=True, check=True)
+if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
+    if os.path.isdir(REPO_DIR):
+        shutil.rmtree(REPO_DIR)
+    subprocess.run(f"git clone --depth 1 https://github.com/Yashhh999/gradientTrace.git {REPO_DIR}", shell=True, check=True)
+else:  # keep runs/ so RESUME works
+    subprocess.run(f"git -C {REPO_DIR} pull --ff-only", shell=True, check=True)
 os.chdir(REPO_DIR)
 subprocess.run("pip -q install -r requirements.txt", shell=True, check=True)
 
 if is_tpu:
     subprocess.run("pip -q install 'torch_xla[tpu]' -f https://storage.googleapis.com/libtpu-releases/index.html", shell=True, check=True)
-    os.environ["PJRT_DEVICE"] = "TPU"
+    os.environ.setdefault("PJRT_DEVICE", "TPU")
 
 import torch, transformers
 if not is_tpu:
@@ -120,20 +123,26 @@ print(f"torch {torch.__version__} | transformers {transformers.__version__} | tp
 
 push = RUN == "full" or PUSH_SMOKE
 hub = HUB_ID if RUN == "full" else HUB_ID + "-smoke"
-cmd = [sys.executable, "-m", "gradienttrace.train", "--config", "configs/base.yaml", "--hub-model-id", hub]
+argv = ["--config", "configs/base.yaml", "--hub-model-id", hub]
 if RUN == "smoke":
-    cmd += ["--smoke", "--max-steps", "40"]
+    argv += ["--smoke", "--max-steps", "40"]
 if push:
     assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN to Colab Secrets."
-    cmd.append("--push-to-hub")
+    argv.append("--push-to-hub")
 if RESUME:
-    cmd.append("--resume")
-subprocess.run(cmd, check=True)
+    argv.append("--resume")
+
+sys.path.insert(0, REPO_DIR)
+from gradienttrace.train import main as train_main
+train_main(argv)   # in-process: the Colab TPU kernel already owns the chip
 ```
 
-This file is also at [`colab/one_shot.py`](colab/one_shot.py). The smoke run is
-network-free (synthetic paired data) and verifies data, training, evaluation,
-and optional Hub upload end to end before you spend GPU hours.
+This file is also at [`colab/one_shot.py`](colab/one_shot.py). Training runs in
+the kernel process on purpose: on Colab TPU a spawned `python -m gradienttrace.train`
+child inherits `PJRT_DEVICE=TPU` but cannot claim a chip the kernel already
+initialized, and exits silently with status 1. The smoke run is network-free
+(synthetic paired data) and verifies data, training, evaluation, and optional
+Hub upload end to end before you spend GPU/TPU hours.
 
 ## Training configuration (defaults)
 

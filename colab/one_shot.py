@@ -25,13 +25,16 @@ except ImportError:
 is_tpu = bool(os.environ.get("COLAB_TPU_ADDR") or os.environ.get("PJRT_DEVICE") == "TPU")
 
 REPO_DIR = "/content/gradientTrace"
-if os.path.isdir(REPO_DIR):
-    shutil.rmtree(REPO_DIR)
-subprocess.run(
-    f"git clone --depth 1 https://github.com/Yashhh999/gradientTrace.git {REPO_DIR}",
-    shell=True,
-    check=True,
-)
+if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
+    if os.path.isdir(REPO_DIR):
+        shutil.rmtree(REPO_DIR)
+    subprocess.run(
+        f"git clone --depth 1 https://github.com/Yashhh999/gradientTrace.git {REPO_DIR}",
+        shell=True,
+        check=True,
+    )
+else:  # keep runs/ so RESUME works
+    subprocess.run(f"git -C {REPO_DIR} pull --ff-only", shell=True, check=True)
 os.chdir(REPO_DIR)
 subprocess.run("pip -q install -r requirements.txt", shell=True, check=True)
 
@@ -42,7 +45,7 @@ if is_tpu:
         shell=True,
         check=True,
     )
-    os.environ["PJRT_DEVICE"] = "TPU"
+    os.environ.setdefault("PJRT_DEVICE", "TPU")
 
 import torch
 import transformers
@@ -56,16 +59,23 @@ print(f"[gradientTrace] torch {torch.__version__} | transformers {transformers._
 
 push = RUN == "full" or PUSH_SMOKE
 hub = HUB_ID if RUN == "full" else HUB_ID + "-smoke"
-cmd = [sys.executable, "-m", "gradienttrace.train", "--config", "configs/base.yaml",
-       "--hub-model-id", hub]
+argv = ["--config", "configs/base.yaml", "--hub-model-id", hub]
 if RUN == "smoke":
-    cmd += ["--smoke", "--max-steps", "40"]
+    argv += ["--smoke", "--max-steps", "40"]
 if push:
     assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN (write scope) to Colab Secrets to push checkpoints."
-    cmd.append("--push-to-hub")
+    argv.append("--push-to-hub")
 if RESUME:
-    cmd.append("--resume")
+    argv.append("--resume")
 
-print("[gradientTrace]", " ".join(cmd))
-subprocess.run(cmd, check=True)
+# Train in this process. On TPU a child process inherits PJRT_DEVICE=TPU but the
+# kernel already owns the chip, so `python -m gradienttrace.train` dies silently
+# with exit code 1. Running main() here keeps the initialized runtime.
+sys.path.insert(0, REPO_DIR)
+from gradienttrace.train import main as train_main
+
+print("[gradientTrace] python -m gradienttrace.train", " ".join(argv))
+code = train_main(argv)
 print("[gradientTrace] done" + (f" -> https://huggingface.co/{hub}" if push else " (local run, no push)"))
+if code:
+    raise SystemExit(code)

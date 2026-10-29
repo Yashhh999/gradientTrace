@@ -146,48 +146,61 @@ if is_tpu:
     os.environ.setdefault("PJRT_DEVICE", "TPU")
     from importlib.metadata import PackageNotFoundError, version
 
-    def versions():
+    def installed(name):
         try:
-            return version("torch").split("+")[0], version("torch_xla").split("+")[0]
+            return version(name).split("+")[0]
         except PackageNotFoundError:
-            return version("torch").split("+")[0], None
+            return None
 
-    torch_v, xla_v = versions()
-    if xla_v != torch_v:
-        # _XLAC.so is ABI-locked to one torch build: a mismatched wheel dies on
-        # `import _XLAC` with "undefined symbol" and takes transformers down too.
-        print(f"[gradientTrace] torch {torch_v} / torch_xla {xla_v} mismatch; aligning")
-        run(
-            f"pip -q install 'torch_xla[tpu]=={torch_v}' "
-            "-f https://storage.googleapis.com/libtpu-releases/index.html",
-            check=False,
-        )
-        torch_v, xla_v = versions()
-    if xla_v != torch_v:
-        # torchvision/torchaudio pin torch exactly and block any torch change;
-        # they are unused here. Only torch_xla 2.8.0/2.8.1/2.9.0 exist in this
-        # image, so settle on a pair that both sides actually publish.
+    # torch_xla is a stale leftover in this image. While it is installed,
+    # transformers and accelerate take the XLA code path instead of the native
+    # TPU backend, and its _XLAC.so is ABI-locked to a torch build that no
+    # longer exists here (undefined symbol on import).
+    run("pip -q uninstall -y torch_xla", check=False)
+
+    # The native torch_tpu backend loads the compiled extension matching the
+    # running torch; extensions ship for torch 2.11-2.15. 2.14.1 is the build
+    # this image originally came with.
+    supported = ("2.11", "2.12", "2.13", "2.14", "2.15")
+
+    def torch_build():
+        value = installed("torch")
+        minor = ".".join(value.split(".")[:2]) if value else None
+        return minor, value
+
+    minor, torch_v = torch_build()
+    if minor not in supported:
+        print(f"[gradientTrace] torch {torch_v} has no torch_tpu extension; restoring 2.14.1")
         run("pip -q uninstall -y torchvision torchaudio", check=False)
-        for torch_target, xla_target in (("2.9.0", "2.9.0"), ("2.8.0", "2.8.0")):
-            print(f"[gradientTrace] installing torch=={torch_target} + torch_xla[tpu]=={xla_target}")
+        for target in ("2.14.1", "2.14.0"):
             run(
-                f"pip -q install 'torch=={torch_target}' --no-deps "
+                f"pip -q install 'torch=={target}' --no-deps "
                 "--index-url https://download.pytorch.org/whl/cpu",
                 check=False,
             )
-            run(
-                f"pip -q install 'torch_xla[tpu]=={xla_target}' "
-                "-f https://storage.googleapis.com/libtpu-releases/index.html",
-                check=False,
-            )
-            torch_v, xla_v = versions()
-            if (torch_v, xla_v) == (torch_target, xla_target):
+            minor, torch_v = torch_build()
+            if minor == "2.14":
                 break
-    if xla_v != torch_v:
-        raise RuntimeError(f"torch {torch_v} and torch_xla {xla_v} could not be aligned; see pip output above")
-    print(f"[gradientTrace] torch {version('torch')} | torch_xla {version('torch_xla')} | tpu=True")
-    # Do NOT import torch in this kernel: on TPU that initializes libtpu here,
-    # and the training subprocess then cannot claim the chip.
+    if minor not in supported:
+        raise RuntimeError(
+            f"torch {torch_v} cannot drive the native TPU backend (need 2.11-2.15); see pip output above"
+        )
+
+    # Do NOT import torch in this kernel: on TPU that claims the chip and the
+    # training child can then no longer initialize libtpu. Verify in a
+    # short-lived child instead, through the same detection training uses.
+    run(
+        [
+            sys.executable,
+            "-c",
+            "from gradienttrace.runtime import detect_runtime;"
+            "r = detect_runtime();"
+            "assert r.kind == 'tpu', f'expected the native TPU backend, got {r}';"
+            "print('[gradientTrace]', r.name, '| precision', r.precision,"
+            " '| micro_batch', r.micro_bs, 'x accum', r.grad_accum)",
+        ]
+    )
+    print(f"[gradientTrace] torch {torch_v} | native torch_tpu | torch_xla removed")
 else:
     import torch
     import transformers

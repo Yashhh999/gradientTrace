@@ -2,8 +2,8 @@
 
 Fine-tunes an encoder backbone (DeBERTa-v3-large by default) as a binary AI-text
 detector on prompt-paired data, with generator-disjoint evaluation and HF Hub
-checkpointing. Runs unchanged on CUDA (2x T4: fp16 + DDP), TPU v5e-1 (bf16 +
-torch_xla), or CPU.
+checkpointing. Runs unchanged on CUDA (2x T4: fp16 + DDP), TPU v5e-1 (bf16,
+native torch_tpu backend), or CPU.
 
 Smoke run (no network data, ~40 steps, verifies the whole pipeline):
     python -m gradienttrace.train --config configs/base.yaml --smoke --max-steps 40
@@ -48,6 +48,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def _resolve_runtime(cfg: Config, args: argparse.Namespace) -> Runtime:
     runtime = detect_runtime()
+    if runtime.kind == "tpu":
+        # accelerate 1.x has no native-TPU branch and would leave the Trainer on
+        # CPU; PartialState reads this variable and keeps the device verbatim.
+        os.environ.setdefault("ACCELERATE_TORCH_DEVICE", "tpu:0")
     if cfg.train.per_device_batch_size != "auto":
         runtime.micro_bs = int(cfg.train.per_device_batch_size)
     if cfg.train.grad_accum != "auto":
@@ -55,10 +59,13 @@ def _resolve_runtime(cfg: Config, args: argparse.Namespace) -> Runtime:
     if cfg.train.dataloader_workers != "auto":
         runtime.workers = int(cfg.train.dataloader_workers)
     if cfg.train.precision != "auto":
-        if runtime.kind == "xla" and cfg.train.precision == "fp16":
-            LOG.warning("fp16 is not supported on TPU/XLA; using bf16")
+        if runtime.kind in ("xla", "tpu") and cfg.train.precision == "fp16":
+            LOG.warning("fp16 is not supported on TPU; using bf16")
         else:
             runtime.precision = cfg.train.precision
+    if runtime.kind == "tpu" and runtime.precision == "bf16" and not _autocast_available("tpu"):
+        LOG.warning("bf16 autocast is not available on this TPU backend; training in fp32")
+        runtime.precision = "no"
     if args.smoke:
         runtime.micro_bs = min(runtime.micro_bs, 4)
         runtime.grad_accum = 1
@@ -73,6 +80,17 @@ def _resolve_runtime(cfg: Config, args: argparse.Namespace) -> Runtime:
         runtime.effective_batch,
     )
     return runtime
+
+
+def _autocast_available(device_type: str) -> bool:
+    import torch
+
+    try:
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            pass
+        return True
+    except Exception:
+        return False
 
 
 def _report_to(cfg: Config) -> list[str]:
@@ -342,7 +360,7 @@ def main(argv=None) -> int:
     tokenizer.save_pretrained(output_dir)
 
     unwrapped = trainer.accelerator.unwrap_model(trainer.model)
-    eval_batch = runtime.micro_bs if runtime.kind == "xla" else max(runtime.micro_bs, 16)
+    eval_batch = runtime.micro_bs if runtime.kind in ("xla", "tpu") else max(runtime.micro_bs, 16)
     report = evaluate_slices(
         unwrapped,
         tokenizer,

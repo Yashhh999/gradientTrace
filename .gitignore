@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+runs/
+wandb/
+.env
+.ipynb_checkpoints/
+data/*.jsonl
+!data/example_local.jsonl
+*.safetensors
+*.bin
+*.pt

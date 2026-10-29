@@ -1,0 +1,56 @@
+# gradientTrace - base configuration
+# Hardware-agnostic: TPU v5e-1 (bf16/XLA) or 2x T4 (fp16/DDP) or CPU.
+seed: 42
+backbone: microsoft/deberta-v3-large   # 435M encoder-only; alt: answerdotai/ModernBERT-large (8k ctx)
+max_length: 512                       # DeBERTa-v3 is pretrained at 512 positions
+
+head:
+  dropout: 0.1
+  pooling: cls                        # cls | mean
+
+train:
+  output_dir: runs/gradientTrace
+  epochs: 3
+  lr: 1.5e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.10                  # linear warmup, then cosine decay to 0
+  max_grad_norm: 1.0
+  per_device_batch_size: auto         # auto: 8 (TPU) / 16 (T4-class GPU)
+  grad_accum: auto                    # auto: effective batch = 64
+  precision: auto                     # auto: bf16 on TPU/Ampere+, fp16 on T4
+  gradient_checkpointing: true
+  early_stopping_patience: 2          # early stop on val AUROC (the real anti-overfit lever)
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  dataloader_workers: auto
+  log_every: 25
+  max_steps: -1
+
+data:
+  total_samples: 150000               # aim 100k-200k; quality/pairing beats volume
+  min_chars: 200
+  max_chars: 12000
+  mix:
+    human: 0.40
+    ai_foundational: 0.40
+    ai_frontier: 0.20
+  val_frac: 0.10
+  test_frac: 0.10
+  max_humanized_frac: 0.25            # cap on paraphrased/humanized AI text inside training
+  held_out_generators: [llama-2, mistral, gemini]   # never trained on; OOD test only
+  frontier_patterns: [gpt-4, gpt-5, gpt4, o1, o3, claude, gemini, grok, llama-3, llama3, mistral-large, deepseek, qwen, command-r]
+  sources: [hc3, pile, local_jsonl]   # or hf:<org/name>[:split] for any hub dataset
+  local_jsonl: data/local.jsonl       # prompt-paired frontier/humanized data goes here
+  scan_limit_per_source: 400000
+  ood_cap: 8000
+
+hub:
+  model_id: Yashhh999/gradientTrace
+  push: false
+  private: false
+  checkpoint_strategy: every_save     # every_save | end | all_checkpoints
+
+wandb:
+  enabled: false
+  project: gradienttrace

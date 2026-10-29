@@ -163,23 +163,26 @@ if is_tpu:
             check=False,
         )
         torch_v, xla_v = versions()
-    if xla_v != torch_v and xla_v:
-        print(f"[gradientTrace] no torch_xla build for torch {torch_v}; trying the latest torch_xla")
-        run(
-            "pip -q install -U 'torch_xla[tpu]' "
-            "-f https://storage.googleapis.com/libtpu-releases/index.html",
-            check=False,
-        )
-        torch_v, xla_v = versions()
-    if xla_v != torch_v and xla_v:
-        print(f"[gradientTrace] installing torch=={xla_v} to match torch_xla")
-        run(
-            f"pip -q install 'torch=={xla_v}' --no-deps "
-            "--index-url https://download.pytorch.org/whl/cpu",
-            check=False,
-        )
-        run(f"pip -q install 'torch=={xla_v}' --no-deps", check=False)
-        torch_v, xla_v = versions()
+    if xla_v != torch_v:
+        # torchvision/torchaudio pin torch exactly and block any torch change;
+        # they are unused here. Only torch_xla 2.8.0/2.8.1/2.9.0 exist in this
+        # image, so settle on a pair that both sides actually publish.
+        run("pip -q uninstall -y torchvision torchaudio", check=False)
+        for torch_target, xla_target in (("2.9.0", "2.9.0"), ("2.8.0", "2.8.0")):
+            print(f"[gradientTrace] installing torch=={torch_target} + torch_xla[tpu]=={xla_target}")
+            run(
+                f"pip -q install 'torch=={torch_target}' --no-deps "
+                "--index-url https://download.pytorch.org/whl/cpu",
+                check=False,
+            )
+            run(
+                f"pip -q install 'torch_xla[tpu]=={xla_target}' "
+                "-f https://storage.googleapis.com/libtpu-releases/index.html",
+                check=False,
+            )
+            torch_v, xla_v = versions()
+            if (torch_v, xla_v) == (torch_target, xla_target):
+                break
     if xla_v != torch_v:
         raise RuntimeError(f"torch {torch_v} and torch_xla {xla_v} could not be aligned; see pip output above")
     print(f"[gradientTrace] torch {version('torch')} | torch_xla {version('torch_xla')} | tpu=True")

@@ -28,6 +28,9 @@ LOG = logging.getLogger("gradienttrace.data")
 
 BUCKETS = ("human", "ai_foundational", "ai_frontier")
 _WS = re.compile(r"\s+")
+# HC3 ships only a loading script, which datasets 4+ refuses; all.jsonl holds the
+# same rows with the script's column names.
+_HC3_JSONL = "https://huggingface.co/datasets/Hello-SimpleAI/HC3/resolve/main/all.jsonl"
 
 
 @dataclass
@@ -82,7 +85,7 @@ def ai_bucket(generator: str, frontier_patterns: Iterable[str]) -> str:
 def load_hc3(cfg: Config, scan_limit: int) -> Iterator[Sample]:
     from datasets import load_dataset
 
-    ds = load_dataset("Hello-SimpleAI/HC3", "all", split="train", streaming=True)
+    ds = load_dataset("json", data_files=_HC3_JSONL, split="train", streaming=True)
     for i, row in enumerate(ds):
         if i >= scan_limit:
             return

@@ -296,6 +296,26 @@ from `last-checkpoint/` on the Hub (optimizer and scheduler state included).
 `MAX_STEPS` optionally bounds a single session; on resume it counts additional
 steps from the checkpoint.
 
+### One-shot Kaggle cell (2x T4)
+
+[`colab/one_shot_kaggle.py`](colab/one_shot_kaggle.py) is the same cell adapted to
+Kaggle: notebook settings **Accelerator = GPU T4 x2**, **Internet = On**, and
+`HF_TOKEN` (write scope) under **Add-ons > Secrets**. It installs requirements,
+clones the repo into `/kaggle/working`, and launches
+`python -m torch.distributed.run --standalone --nproc_per_node 2` so both T4s train
+in DDP. Activation checkpointing is on, so bf16-less T4s run fp16 with a
+GradScaler at 4 micro-batch x 8 accumulation per GPU = 64 global, matching the
+TPU run. Warmup and throughput logging account for the extra process, and only
+rank 0 evaluates, saves, and pushes to the Hub.
+
+`RUN="smoke"` is a roughly ten-minute two-GPU pipeline check; `RUN="full"` trains,
+with the same `MAX_STEPS` / `SAVE_EVERY` / `EPOCHS` / `RESUME` knobs as Colab.
+Kaggle sessions are capped at 12 hours and the working directory does not persist,
+so a full run spans a few sessions: push, then start a fresh notebook with
+`RESUME = True` and the cell re-downloads `last-checkpoint/` from the Hub. Two T4s
+at 64 global batch land around 1.7-1.9x a single T4, i.e. roughly 13-18 hours for
+three epochs.
+
 ## Training configuration (defaults)
 
 | setting | value | reason |
@@ -304,7 +324,7 @@ steps from the checkpoint.
 | weight decay | 0.01 | regularization |
 | head dropout | 0.1 | regularize the classifier, not the pretrained encoder |
 | max_length | 512 | DeBERTa-v3 position limit |
-| batch | 4x16 (TPU) / 16x4 (T4) = 64 | fits the 16GB v5e-1, DDP/XLA-safe |
+| batch | 4x16 (TPU) / 16x4 (T4) / 4x8x2 (2xT4) = 64 | fits the 16GB v5e-1, DDP/XLA-safe |
 | precision | bf16 on TPU/Ampere+, fp16+GradScaler on T4 | T4 (Turing) has no bf16 |
 | eval/save | per epoch, keep 2 | `load_best_model_at_end` on val AUROC |
 | early stopping | patience 2 on AUROC | the real anti-overfitting lever |

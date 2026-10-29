@@ -38,6 +38,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--smoke", action="store_true", help="network-free synthetic run to verify the pipeline")
     parser.add_argument("--max-steps", type=int, default=None, help="stop after this many optimizer steps; with --resume the count starts at the checkpoint's step")
     parser.add_argument("--save-steps", type=int, default=0, help="checkpoint + eval every N optimizer steps (0 = config strategies)")
+    parser.add_argument("--batch-size", type=int, default=0, help="per-device micro batch; 0 = auto")
+    parser.add_argument("--grad-accum", type=int, default=0, help="gradient accumulation steps; 0 = auto")
     parser.add_argument("--epochs", type=float, default=None)
     parser.add_argument("--backbone", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -60,6 +62,10 @@ def _resolve_runtime(cfg: Config, args: argparse.Namespace) -> Runtime:
         runtime.grad_accum = int(cfg.train.grad_accum)
     if cfg.train.dataloader_workers != "auto":
         runtime.workers = int(cfg.train.dataloader_workers)
+    if args.batch_size:
+        runtime.micro_bs = args.batch_size
+    if args.grad_accum:
+        runtime.grad_accum = args.grad_accum
     if cfg.train.precision != "auto":
         if runtime.kind in ("xla", "tpu") and cfg.train.precision == "fp16":
             LOG.warning("fp16 is not supported on TPU; using bf16")
@@ -111,6 +117,14 @@ def _report_to(cfg: Config) -> list[str]:
     return report_to + ["wandb"]
 
 
+def _world_size() -> int:
+    """Processes started by torchrun/accelerate for this job (1 when single-process)."""
+    try:
+        return max(1, int(os.environ.get("LOCAL_WORLD_SIZE") or 1))
+    except ValueError:
+        return 1
+
+
 def _build_training_args(
     cfg: Config,
     runtime: Runtime,
@@ -120,6 +134,7 @@ def _build_training_args(
     hub_id: str,
     train_size: int,
     save_every: int = 0,
+    world_size: int = 1,
 ):
     from transformers import TrainingArguments
 
@@ -174,7 +189,9 @@ def _build_training_args(
         if max_steps > 0:
             total_steps = max_steps
         else:
-            steps_per_epoch = math.ceil(train_size / max(1, runtime.effective_batch))
+            steps_per_epoch = math.ceil(
+                train_size / max(1, runtime.effective_batch * world_size)
+            )
             total_steps = max(1, int(steps_per_epoch * cfg.train.epochs))
         kwargs["warmup_steps"] = max(1, int(cfg.train.warmup_ratio * total_steps))
 
@@ -422,6 +439,9 @@ def main(argv=None) -> int:
 
     resume_ckpt = _resolve_resume(cfg, hub_id, hf_token) if args.resume else None
     max_steps = _session_max_steps(resume_ckpt, max_steps)
+    world = _world_size()
+    if world > 1:
+        LOG.info("distributed: %d processes | global effective batch %d", world, runtime.effective_batch * world)
 
     train_args = _build_training_args(
         cfg,
@@ -432,10 +452,14 @@ def main(argv=None) -> int:
         hub_id,
         train_size=len(train_ds),
         save_every=args.save_steps,
+        world_size=world,
     )
     trainer = _build_trainer(model, tokenizer, train_ds, val_ds, train_args, cfg)
 
     trainer.train(resume_from_checkpoint=resume_ckpt)
+
+    if not trainer.is_world_process_zero():
+        return 0
 
     output_dir = Path(cfg.train.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -19,7 +19,7 @@ train:
   grad_accum: auto                    # auto: effective batch = 64
   precision: auto                     # auto: bf16 on TPU/Ampere+, fp16 on T4
   gradient_checkpointing: true
-  early_stopping_patience: 2          # early stop on val AUROC (the real anti-overfit lever)
+  early_stopping_patience: 0          # 0 = run all epochs; a resumed run restores best_metric, so 2 would stop again
   eval_strategy: epoch
   save_strategy: epoch
   save_total_limit: 2

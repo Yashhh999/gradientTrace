@@ -311,6 +311,7 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
     for spec in dcfg.sources:
         loader = _make_loader(spec, cfg)
         loaded = 0
+        LOG.info("scanning source '%s'", spec)
         try:
             for sample in loader(cfg, dcfg.scan_limit_per_source):
                 sample.text = norm_text(sample.text)
@@ -351,6 +352,12 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
             LOG.warning("source '%s' failed: %r", spec, exc)
             manifest["errors"][spec] = repr(exc)
         manifest["sources"][spec] = loaded
+        LOG.info(
+            "source '%s': kept %d (pools %s)",
+            spec,
+            loaded,
+            {b: len(pool) for b, pool in pools.items()},
+        )
         if all(len(pools[b]) >= caps[b] for b in BUCKETS):
             break
 

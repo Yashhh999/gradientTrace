@@ -46,7 +46,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--hub-model-id", default=None)
     parser.add_argument("--push-to-hub", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="continue from the newest complete checkpoint (local, else the Hub); fails if none exists")
     return parser.parse_args(argv)
 
 
@@ -263,6 +263,29 @@ def _fmt(value, spec: str = ".4f") -> str:
 
 
 _CHECKPOINT_RE = re.compile(r"^checkpoint-(\d+)$")
+_WEIGHT_FILES = (
+    "model.safetensors",
+    "pytorch_model.bin",
+    "model.safetensors.index.json",
+    "pytorch_model.bin.index.json",
+)
+
+
+def _state_step(checkpoint: Path) -> int | None:
+    state = checkpoint / "trainer_state.json"
+    if not state.is_file():
+        return None
+    try:
+        return int(json.loads(state.read_text(encoding="utf-8")).get("global_step") or 0)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _checkpoint_complete(checkpoint: Path) -> bool:
+    """A resumable checkpoint needs both Trainer state and model weights."""
+    return (checkpoint / "trainer_state.json").is_file() and any(
+        (checkpoint / name).is_file() for name in _WEIGHT_FILES
+    )
 
 
 def _latest_local_checkpoint(output_dir: Path) -> Path | None:
@@ -271,52 +294,81 @@ def _latest_local_checkpoint(output_dir: Path) -> Path | None:
         match = _CHECKPOINT_RE.match(child.name)
         if match and child.is_dir():
             found.append((int(match.group(1)), child))
-    return max(found)[1] if found else None
+    for _, child in sorted(found, reverse=True):
+        if _checkpoint_complete(child):
+            return child
+    return None
 
 
-def _resolve_resume(cfg: Config, hub_id: str, hf_token: str | None) -> str | None:
-    """Newest local checkpoint, else the newest one Trainer pushed to the Hub.
+def _resolve_resume(cfg: Config, hub_id: str, hf_token: str | None) -> str:
+    """Newest complete checkpoint: local first, else the Hub.
 
-    With `hub_strategy="checkpoint"` the latest complete Trainer checkpoint sits
-    at `last-checkpoint/`, optimizer and scheduler included, so a fresh Colab
-    session can continue a run that died with the old VM. `checkpoint-<step>/`
-    directories (all_checkpoints strategy) are also accepted.
+    `--resume` means "continue", so when nothing resumable exists this raises
+    instead of silently retraining from step 0. `last-checkpoint/`
+    (hub_strategy "checkpoint") and `checkpoint-<step>/` (every_save /
+    all_checkpoints) are both candidates, ranked by the `global_step` recorded
+    in their trainer_state.json - a half-uploaded `last-checkpoint/` must not
+    hide an older but complete checkpoint.
     """
     local = _latest_local_checkpoint(Path(cfg.train.output_dir))
     if local is not None:
-        LOG.info("resume: local checkpoint %s", local)
+        LOG.info("resume: local %s (global_step=%s)", local, _state_step(local))
         return str(local)
     if not hub_id:
-        LOG.warning("resume: no local checkpoint and no hub_model_id; starting fresh")
-        return None
-    from huggingface_hub import HfApi, snapshot_download
+        raise SystemExit("resume: no local checkpoint and no hub_model_id; refusing to start from scratch")
+
+    from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
     try:
         names = HfApi(token=hf_token).list_repo_files(hub_id, repo_type="model")
     except Exception as exc:
-        LOG.warning("resume: no local checkpoint and %s is unreachable (%r); starting fresh", hub_id, exc)
-        return None
-    steps = sorted(
-        int(match.group(1))
-        for name in names
-        if (match := _CHECKPOINT_RE.match(name.split("/")[0]))
+        raise SystemExit(f"resume: cannot list {hub_id} ({exc!r}); refusing to start from scratch") from exc
+
+    candidates = sorted(
+        {
+            folder
+            for name in names
+            if "/" in name
+            and ((folder := name.split("/")[0]) == "last-checkpoint" or _CHECKPOINT_RE.match(folder))
+        }
     )
-    if any(name.split("/")[0] == "last-checkpoint" for name in names):
-        target = "last-checkpoint"
-    elif steps:
-        target = f"checkpoint-{steps[-1]}"
-    else:
-        LOG.warning("resume: no last-checkpoint/ or checkpoint-* in %s; starting fresh", hub_id)
-        return None
-    LOG.info("resume: downloading %s/%s", hub_id, target)
-    snapshot = Path(
-        snapshot_download(hub_id, repo_type="model", token=hf_token, allow_patterns=[f"{target}/*"])
-    )
-    checkpoint = snapshot / target
-    if not (checkpoint / "trainer_state.json").exists():
-        LOG.warning("resume: %s/%s has no trainer_state.json; starting fresh", hub_id, target)
-        return None
-    return str(checkpoint)
+    ranked: list[tuple[int, str]] = []
+    for folder in candidates:
+        try:
+            state_file = hf_hub_download(
+                hub_id, f"{folder}/trainer_state.json", repo_type="model", token=hf_token
+            )
+            step = int(json.loads(Path(state_file).read_text(encoding="utf-8")).get("global_step") or 0)
+        except Exception as exc:
+            LOG.warning("resume: %s/%s is not resumable (%r)", hub_id, folder, exc)
+            continue
+        ranked.append((step, folder))
+    if not ranked:
+        found = ", ".join(candidates) or "no checkpoint folders"
+        raise SystemExit(
+            f"resume: no resumable checkpoint in {hub_id} ({found}); refusing to start from scratch"
+        )
+    ranked.sort(reverse=True)
+
+    for step, target in ranked:
+        LOG.info("resume: downloading %s/%s (global_step=%d)", hub_id, target, step)
+        try:
+            snapshot = Path(
+                snapshot_download(hub_id, repo_type="model", token=hf_token, allow_patterns=[f"{target}/*"])
+            )
+        except Exception as exc:
+            LOG.warning("resume: download of %s/%s failed (%r)", hub_id, target, exc)
+            continue
+        checkpoint = snapshot / target
+        if not _checkpoint_complete(checkpoint):
+            LOG.warning(
+                "resume: %s/%s is incomplete (missing trainer_state.json or weights); trying an older checkpoint",
+                hub_id,
+                target,
+            )
+            continue
+        return str(checkpoint)
+    raise SystemExit(f"resume: no complete checkpoint in {hub_id}; refusing to start from scratch")
 
 
 def _model_card(cfg: Config, report: dict, runtime: Runtime) -> str:
@@ -412,6 +464,8 @@ def main(argv=None) -> int:
         )
         LOG.info("pushing checkpoints to https://huggingface.co/%s", hub_id)
 
+    resume_ckpt = _resolve_resume(cfg, hub_id, hf_token) if args.resume else None
+
     bundle = build_datasets(cfg, smoke=args.smoke)
     LOG.info(
         "data: train=%d val=%d slices=%s",
@@ -442,7 +496,6 @@ def main(argv=None) -> int:
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
-    resume_ckpt = _resolve_resume(cfg, hub_id, hf_token) if args.resume else None
     max_steps = _session_max_steps(resume_ckpt, max_steps)
     world = _world_size()
     if world > 1:

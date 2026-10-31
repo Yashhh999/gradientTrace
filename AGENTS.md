@@ -387,6 +387,15 @@ reviews 0.6345. Directionally better than v1 but unusable (96.75% of human texts
 above 0.5). The pilot trained with MAGE labels inverted (see §11), so this is not a clean
 measurement of the recipe; the next pilot supersedes it.
 
+v2 pilot with fixed MAGE labels (`external_gate_v1_report_v2-pilot-fix.json`, 2026-11-01):
+pooled AUROC 0.7258, TPR@1% FPR 0.1288, FPR@0.5 0.5463, pairwise 0.7100, matched AUROC 0.6387;
+news 0.4775 / 0.0125 / 0.9700 (human mean P(AI) 0.9208, AI mean 0.9318); reviews 0.9653 /
+0.4525 / 0.1225. The pooled move is carried entirely by reviews — Yelp, which RAID supplies in
+training. On news, the only slice whose humans come from a source never in training, the model
+is at chance and still flags 97% of human text as AI. Internal held-out poetry jumped to
+0.9732 / 0.577, but every poetry human row in the RAID slice is perturbed, so that is partly
+the same shortcut (§7.6).
+
 Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp, so the
 reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
 human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
@@ -411,8 +420,10 @@ for the requested domain, and pushes `v2/raid_v2.jsonl` + `v2/raid_v2_meta.json`
 Current slice (checked on the Hub 2026-10-31): 71,297 rows, 18,848 human rows across 7 domains;
 133.2 MB. The 73,500 / 21,000 figures printed during the build are caps, not actual rows. Human
 p50 885–1,922 chars; AI p50 892–1,962. Clean (`attack: none`) humans exist only in reviews
-(650), wiki (293), recipes (290); all other human rows are perturbed — a known caveat when
-interpreting style cues.
+(650), wiki (293), recipes (290). News, reddit, books and poetry are 100% perturbed humans
+(news: 1,500 `perplexity_misspelling` + 1,500 `number`, zero clean) while every AI row is
+clean — so in those domains perturbation is the only cue separating the classes, and the model
+learns "clean = AI". This is the gate's news failure (§7.5), not a modelling problem.
 
 ---
 
@@ -481,10 +492,11 @@ state, ~4.4–5 GB per push).
 | torch_tpu “no extension module compatible” | torch outside 2.11–2.15 | reinstall a supported torch build (cell handles 2.14.1) |
 | internal AUROC 0.9999 but humans flagged | source confounding | ignore internal numbers; run the gate |
 | gate flags ~97% of humans as AI; pooled AUROC ~0.5-0.6 | a source's labels are inverted (MAGE ships 1 = human, 0 = machine) | use `mage`, not `hf:yaful/MAGE`; check every new source's label convention |
+| gate ~0.96 on reviews but ~0.48 on news, 97% of news humans flagged | training humans are perturbed in news/reddit/books/poetry, clean only in reviews/wiki/recipes; AI is clean everywhere | clean human rows per domain (rebuild the RAID human side) |
 
 ---
 
-## 11. Current status (2026-10-31)
+## 11. Current status (2026-11-01)
 
 - **Root cause of the gate failure (found 2026-10-31):** `yaful/MAGE` labels 1 = human and
   0 = machine, while the generic `hf:` adapter assumes 1 = AI. `hf:yaful/MAGE` therefore fed
@@ -500,33 +512,34 @@ state, ~4.4–5 GB per push).
   `test_humanized` empty. A probe scored unseen human ag_news at mean P(AI) 0.9553
   (95% above 0.9) and Yelp at 0.9950 (99.5% above 0.9). **Not shippable**, and its gate
   numbers are partly explained by the MAGE inversion; not a clean baseline for the recipe.
-- **External gate v1:** v1 pooled AUROC 0.5270, TPR@1% FPR 0.0000, FPR@0.5 0.9750; first
-  pilot pooled 0.5745 / 0.0263 / 0.9675 (§7.5). Both unusable. The dataset is frozen and
-  stays the comparison.
+- **External gate v1:** v1 pooled 0.5270 / 0.0000 / 0.9750; first (label-inverted) pilot
+  0.5745 / 0.0263 / 0.9675; fixed pilot 0.7258 / 0.1288 / 0.5463, but news alone 0.4775 /
+  0.0125 / 0.9700 (§7.5). All unusable. The dataset is frozen and stays the comparison.
 - **v2 data:** RAID slice healthy (71,297 rows; 18,848 humans in 7 domains; poetry held out).
   `configs/v2.yaml` and `configs/pilot.yaml` use hc3 + mage + arena + RAID, source quotas,
   grouped splits, humanized cap, held-out poetry.
-- **Pilot (2026-10-31):** completed 607 steps in 4,637 s; best val AUROC 0.9972 at step 600
-  (TPR@1% 0.9498). Final slices: val 0.9972/0.950, in-domain 0.9946/0.913, OOD generators
-  0.9986/0.982, humanized 0.9960/0.955, held-out domain (poetry) 0.7512/0.172. The weights
-  are on the Hub but invalid for a clean comparison until the pilot is rerun with the fixed
-  MAGE labels.
-- **Pilot data build (pre-fix):** train 38,792 / val 5,089; buckets 16,100 human / 15,989
-  foundational / 6,703 frontier; sources MAGE 11,317 / raid 16,818 / hc3 5,870 / arena 4,787.
-  These counts are obsolete. The next manifest must show mage domains (cmv, eli5, hswag,
-  roct, sci_gen, squad, tldr, wp, xsum) and no `hf:yaful/MAGE` key; the human bucket now
-  contains ~5.6k more real humans. Frontier supply remains short (~20.4k of the 30k target
-  at 150k); fix that after the gate.
+- **Pilot history:** pre-fix pilot (2026-10-31) ran 607 steps in 4,637 s with val 0.9972.
+  Fixed pilot (2026-11-01) ran the same 607 steps in ~80 min: val 0.9966/0.937, in-domain
+  0.9966/0.933, OOD 0.9993/0.987, humanized 0.9993/0.984, held-out poetry 0.9732/0.577.
+- **Diagnosis (2026-11-01):** the RAID human side is perturbed in news, reddit, books and
+  poetry and clean only in reviews/wiki/recipes, while AI rows are clean everywhere. The model
+  learned domain-specific "perturbed = human, clean = AI". The gate's clean ag_news humans
+  score mean P(AI) 0.92, while clean Yelp humans score 0.16 — reviews works because clean Yelp
+  humans are in training, i.e. it is recognising Yelp, not machine text. MAGE's clean humans
+  cover Q&A/summary/forum styles, not news articles.
+- **Pilot data build (fixed, 2026-11-01):** train 38,717 / val 5,208; buckets 16,052 human /
+  15,963 foundational / 6,702 frontier; slices in-domain 4,520, OOD 11,948 (+48 from the qwen
+  holdout), humanized 756, held-out poetry 5,060. hc3 pools 7,564/3,064, raid 12,064/13,564/
+  2,381, arena 6,064 frontier; mage fills its share across the 9 non-yelp domains. Frontier
+  supply is short (~8.4k of the 10k pilot target; ~20.4k of 30k at 150k); fix after the gate.
 - **Next steps, in order:**
-  1. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) — the data changed, so
-     the old checkpoint is invalid. Expect ~607 steps, ~80-90 min training plus data build and
-     final eval.
-  2. Gate it with `MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`,
-     `MODEL_LABEL="v2-pilot-fix"`, `GATE_NAME="external_gate_v1"`, `REGENERATE=False`,
-     `PUSH=True`. Compare pooled and news TPR@1% FPR / AUROC; news is the cleaner human-source
-     slice, and reviews is Yelp-seen via RAID.
-  3. Only if the gate moves, commit to the full 150k v2 run (`Yashhh999/gradientTrace-v2`,
-     ~12h on 2×T4, ~30h on v5e-1) after fixing the frontier supply.
+  1. Probe the RAID news/reddit/books/poetry blocks for clean (`attack: none`) human rows by
+     scanning the full windows — the extractor stops as soon as its caps fill, so clean rows
+     may simply be further into the block. If they exist, make `build_raid.py` prefer clean
+     humans, rebuild the slice, and retrain the pilot.
+  2. If RAID has no clean humans in those domains, build paired clean-news data (human
+     BBC/CC-News articles plus a small open model writing on the same prompts) before training.
+  3. Only after the news slice moves, consider the 150k run — and fix the frontier supply first.
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---

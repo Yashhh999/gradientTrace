@@ -7,14 +7,14 @@
 HUB_ID = "Yashhh999/gradientTrace"   # repo that stores the extracted slice
 RAID_URL = "https://huggingface.co/datasets/liamdugan/raid/resolve/main/train.csv"
 # (start GB, end GB) measured on train.csv; each block starts on a row boundary near these
-WINDOWS = {
+WINDOWS = {  # byte ranges probed on train.csv; overlaps are filtered out by the domain column
     "news":    (3.30, 5.10),
-    "reviews": (9.04, 9.92),
-    "reddit":  (7.55, 9.05),
-    "wiki":    (9.85, 11.78),
-    "books":   (1.40, 3.35),
-    "recipes": (6.15, 7.55),
-    "poetry":  (5.05, 6.15),
+    "reviews": (9.04, 9.93),
+    "reddit":  (7.85, 9.05),
+    "wiki":    (9.93, 11.78),
+    "books":   (1.75, 3.35),
+    "recipes": (6.20, 7.90),
+    "poetry":  (5.05, 6.22),
 }
 HUMAN_CAP = 3000        # per domain
 AI_CAP = 6000           # per domain, attack == none
@@ -284,6 +284,13 @@ for domain, (start_gb, end_gb) in WINDOWS.items():
         print(f"[raid] {domain}: already in the pushed slice, skipping", flush=True)
         continue
     rows = list(build_domain(domain, start_gb, end_gb))
+    if not rows:  # a wrong byte window must not be recorded as done
+        print(
+            f"[raid] {domain}: 0 rows in {start_gb:.2f}-{end_gb:.2f} GB; window is wrong,"
+            " not marking it complete",
+            flush=True,
+        )
+        continue
     total = archive(rows)
     meta["domains"][domain] = {
         "rows": len(rows),

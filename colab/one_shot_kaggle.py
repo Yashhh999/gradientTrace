@@ -16,12 +16,15 @@ MICRO_BATCH = 4                      # per GPU; 4 x 8 accum x 2 GPUs = 64 global
 GRAD_ACCUM = 8
 LOCAL_JSONL = ""                     # e.g. "/kaggle/input/gradienttrace/local.jsonl"
 
+import collections
+import json
 import os, shutil, socket, subprocess, sys
 
 
 def run(command, check=True):
-    """Stream a child's output through the notebook; Kaggle hides raw child fds."""
+    """Stream a child's output through the notebook; repeat the traceback on failure."""
     env = dict(os.environ, PYTHONUNBUFFERED="1")
+    recent = collections.deque(maxlen=4000)
     with subprocess.Popen(
         command,
         shell=isinstance(command, str),
@@ -33,10 +36,46 @@ def run(command, check=True):
     ) as proc:
         for line in proc.stdout:
             print(line, end="", flush=True)
+            recent.append(line)
         proc.wait()
     if check and proc.returncode:
+        tail = list(recent)
+        start = max(
+            (i for i, line in enumerate(tail) if "Traceback (most recent call last)" in line),
+            default=max(0, len(tail) - 80),
+        )
+        print("\n[gradientTrace] child failure (reprinted so it is not scrolled away):")
+        print("".join(tail[start : start + 120]), flush=True)
         raise RuntimeError(f"command failed with exit {proc.returncode}: {command}")
     return proc.returncode
+
+
+def check_hub(repo_id):
+    """Prove the token can create and write the repo before a two-hour run starts."""
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=os.environ["HF_TOKEN"])
+    try:
+        me = api.whoami()
+        role = ((me.get("auth") or {}).get("accessToken") or {}).get("role")
+        print(f"[gradientTrace] hub token: user={me.get('name')} role={role}", flush=True)
+        if role == "read":
+            raise RuntimeError("the token is read-only")
+        api.create_repo(repo_id, repo_type="model", private=True, exist_ok=True)
+        api.upload_file(
+            path_or_fileobj=b"ok",
+            path_in_repo=".preflight",
+            repo_id=repo_id,
+            commit_message="gradientTrace preflight",
+        )
+        api.delete_file(".preflight", repo_id=repo_id, commit_message="gradientTrace preflight cleanup")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Hub preflight failed for {repo_id}: {exc!r}. Create it once at "
+            f"https://huggingface.co/new (model, private, name '{repo_id.split('/')[-1]}'), "
+            "or use a token with write scope and repo creation; then re-run this cell."
+        ) from exc
+    print(f"[gradientTrace] hub preflight ok -> https://huggingface.co/{repo_id}", flush=True)
 
 
 try:  # Kaggle secrets -> env
@@ -82,6 +121,11 @@ DEFAULT_HUB = {
     "pilot": "Yashhh999/gradientTrace-v2-pilot",
 }
 HUB_ID = HUB_ID or DEFAULT_HUB[CONFIG]
+push = RUN == "full" or PUSH_SMOKE
+hub = HUB_ID if RUN == "full" else HUB_ID + "-smoke"
+if push:
+    assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN (write scope) in Add-ons > Secrets to push checkpoints."
+    check_hub(hub)
 
 if CONFIG in ("v2", "pilot"):  # paired RAID slice; build it once with colab/build_raid.py
     from huggingface_hub import hf_hub_download
@@ -96,10 +140,23 @@ if CONFIG in ("v2", "pilot"):  # paired RAID slice; build it once with colab/bui
         raise RuntimeError(
             f"RAID slice missing: run colab/build_raid.py with HUB_ID={RAID_HUB} first ({exc!r})"
         ) from exc
-    shutil.copy(raid_src, os.path.join(REPO_DIR, "data/raid_v2.jsonl"))
+    raid_path = os.path.join(REPO_DIR, "data/raid_v2.jsonl")
+    shutil.copy(raid_src, raid_path)
+    rows = humans = 0
+    with open(raid_path, encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            rows += 1
+            humans += json.loads(line).get("label") == 0
+    if humans < 1000:  # the first slice kept almost no RAID humans; refuse to train on it
+        raise RuntimeError(
+            f"RAID slice at {RAID_HUB}/v2/raid_v2.jsonl has {humans} human rows; rebuild it"
+            " with colab/build_raid.py before running v2/pilot."
+        )
     print(
         f"[gradientTrace] raid slice <- {RAID_HUB}/v2/raid_v2.jsonl"
-        f" ({os.path.getsize(os.path.join(REPO_DIR, 'data/raid_v2.jsonl')) / 1e6:.1f} MB)"
+        f" ({rows} rows, {humans} human, {os.path.getsize(raid_path) / 1e6:.1f} MB)"
     )
 
 import torch  # safe here: only the TPU runtime cares about a kernel-side torch import
@@ -121,8 +178,6 @@ launcher = os.path.join(REPO_DIR, "kaggle_launch.py")
 with open(launcher, "w", encoding="utf-8") as handle:
     handle.write("from gradienttrace.train import main\n\nraise SystemExit(main())\n")
 
-push = RUN == "full" or PUSH_SMOKE
-hub = HUB_ID if RUN == "full" else HUB_ID + "-smoke"
 cmd = [
     sys.executable, "-m", "torch.distributed.run", "--standalone",
     "--nproc_per_node", str(world), launcher,
@@ -139,7 +194,6 @@ else:
     if EPOCHS:
         cmd += ["--epochs", str(EPOCHS)]
 if push:
-    assert os.environ.get("HF_TOKEN"), "Add HF_TOKEN (write scope) in Add-ons > Secrets to push checkpoints."
     cmd.append("--push-to-hub")
 if RESUME:
     cmd.append("--resume")

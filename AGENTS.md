@@ -18,11 +18,12 @@ real runs, and the current state of the work. Update this file when behavior cha
   on every internal slice because the slices are source-confounded (domain equals label).
   A probe showed it flags ordinary human news/reviews as AI ~95–99% of the time.
   The only acceptance signal is the external gate (`colab/external_gate.py`).
-- **Current phase (2026-10-31):** the pilot trained and the external gate exposed a data bug:
-  `hf:yaful/MAGE` mapped MAGE's `label` (1 = human, 0 = machine) as if 1 = AI, so both v1 and
-  the pilot trained on ~11k inverted clean texts. A dedicated `mage` loader (correct labels,
-  domain/generator from `src`, yelp excluded, train split shuffled) is in place. Re-run the
-  50k pilot before any full v2 run.
+- **Current phase (2026-11-01):** the MAGE label inversion is fixed and the fixed pilot moved
+  reviews but not news: on the unseen clean ag_news humans it is at chance and still flags 97%
+  as AI. The cause is RAID's human side (news/reddit/books/poetry humans are 100% perturbed,
+  its AI rows are clean), so the model learned "clean = AI". `colab/build_news.py` now builds
+  paired clean CNN/DailyMail news plus AI news written with the gate's own prompt; the next
+  pilot trains on it. No full 150k run until the gate's news slice moves.
 
 ---
 
@@ -97,6 +98,7 @@ colab/
   external_gate.py    external acceptance gate (frozen matched human/AI dataset)
   finish_eval.py      resumable full slice evaluation on a single GPU
   build_raid.py       one-time RAID byte-range extractor -> Hub v2/raid_v2.jsonl
+  build_news.py       paired clean-news builder -> Hub v2/news_pairs.jsonl (v2 local.jsonl)
 data/example_local.jsonl  schema example for prompt-paired `local.jsonl`
 tests/test_metrics.py     metric unit tests
 .github/workflows/ci.yml  compileall + metric tests
@@ -180,7 +182,7 @@ and log a warning (they do not crash). Single-class slices produce NaN AUROC.
 | `arena` | `lmarena-ai/arena-human-preference-55k` | `model_a/b`, `response_a/b` (JSON-list strings per turn); only public generator-labelled frontier source; domain `chat` |
 | `hf:<org/name>[:split]` | generic adapter | auto-detects text/label/generator/prompt/domain columns; it assumes `label` 1 = AI, so check the dataset card before using it |
 | `raid` | `cfg.data.raid_jsonl` | paired human/model rows, `variant` raw/humanized, `attack`, `group`; see 5.5 |
-| `local_jsonl` | `cfg.data.local_jsonl` | user-supplied paired data; see schema below |
+| `local_jsonl` | `cfg.data.local_jsonl` | user-supplied paired data; v2/pilot use the clean-news pairs from `colab/build_news.py`; see schema below |
 
 Loader exceptions are caught per source, logged, and recorded in `manifest["errors"]`; one
 flaky Hub dataset does not kill a run. An **unknown source name** (not matching any loader)
@@ -254,6 +256,10 @@ the **same prompt**; unpaired corpora inflate in-domain scores and collapse unde
 RAID JSONL records additionally carry `attack`, `pair_id` (equal to `group`), `source: "raid"`.
 The loader ignores extra keys, so adding fields to the RAID builder is safe.
 
+`colab/build_news.py` writes the same schema: `domain: news`, `bucket: ai_foundational` on the
+AI rows, `source` = the dataset id (human) or `generated` (AI), and a `group: cnn-<hash>` shared
+by a human lead and its AI texts so they never straddle a split.
+
 ### 5.7 Optional length matching
 
 `data.length_match: true` rebalances the chosen pools so human and AI share a length histogram
@@ -270,9 +276,10 @@ All configs share the model/schedule; only data and Hub targets differ.
 | | base (v1) | v2 | pilot |
 |---|---|---|---|
 | samples / epochs | 150k / 3 | 150k / 3 | 50k / 1 |
-| sources | hc3, pile, mage, arena, local | hc3, mage, arena, raid, local | same as v2 |
-| shares | none | per 5.3 | per 5.3 |
+| sources | hc3, pile, mage, arena, local_jsonl | hc3, mage, arena, raid, local_jsonl | same as v2 |
+| shares | none | per 5.3 (local_jsonl 0.25) | per 5.3 (local_jsonl 0.25) |
 | RAID | no | `data/raid_v2.jsonl` | same |
+| news pairs | — | `data/local.jsonl` from `build_news.py` | same |
 | held-out domain | — | poetry | poetry |
 | output dir | `runs/gradientTrace` | `runs/gradientTrace-v2` | `runs/gradientTrace-v2-pilot` |
 | Hub repo | `Yashhh999/gradientTrace` | `…-v2` | `…-v2-pilot` |
@@ -315,7 +322,10 @@ Settings: **Accelerator = GPU T4 x2**, **Internet = On**, `HF_TOKEN` in Add-ons 
   fp16, gradient checkpointing).
 - For `v2|pilot` it downloads `v2/raid_v2.jsonl` from `RAID_HUB` and **refuses a slice with
   fewer than 10,000 humans or fewer than seven populated domains** (the first stale slice had
-  1,233 humans in three domains and would otherwise train silently).
+  1,233 humans in three domains and would otherwise train silently). It then downloads
+  `v2/news_pairs.jsonl` from `NEWS_HUB` into `data/local.jsonl` and refuses fewer than 1,000
+  human or 1,000 AI rows (unless `LOCAL_JSONL` overrides it). The news pairs are the clean
+  human-news contrast; training without them re-learns "clean = AI".
 - With `push`, it runs a **Hub preflight** before training: prints token role, creates the repo
   if needed, uploads and deletes `.preflight`. A bad token fails in seconds, not after a 2-hour
   run.
@@ -425,6 +435,34 @@ p50 885–1,922 chars; AI p50 892–1,962. Clean (`attack: none`) humans exist o
 clean — so in those domains perturbation is the only cue separating the classes, and the model
 learns "clean = AI". This is the gate's news failure (§7.5), not a modelling problem.
 
+### 7.7 Clean-news builder (`colab/build_news.py`)
+
+One-time, resumable, GPU cell. It fixes the news failure from the human side: CNN/DailyMail
+leads (clean, unperturbed human news prose, 200–520 chars, cut on a sentence boundary) are each
+paired with one AI news text per generator, written with the external gate's own journalist
+prompt (same system line, same `{words}`/snippet instruction, T=0.8, top_p=0.9, length-matched
+and trimmed at a sentence boundary).
+
+- Humans: `nschantz21/cnn_dailymail-parsed` (parquet copy of CNN/DailyMail 3.0.0), train split,
+  `article` field; first sentences until 200 chars, max 520. A lead that does not end on a
+  sentence boundary is skipped.
+- Generators: `microsoft/Phi-3-mini-4k-instruct` and `ibm-granite/granite-3.0-2b-instruct`
+  (SmolLM2-1.7B is the fallback when an architecture is unsupported). Never Qwen — it is the
+  gate's generator.
+- Output: 4,000 human leads + up to 8,000 AI texts as `v2/news_pairs.jsonl`, plus
+  `v2/news_pairs_meta.json` (counts, per-generator lengths, prompt template). Rows use the
+  `local.jsonl` schema: label 0/1, `domain: news`, `bucket: ai_foundational` (human rows are
+  forced to `human`), and a shared `group` per story so the human and both AI rows never
+  straddle a split.
+- Resumable: rows are appended and pushed every 200 generations; `REGENERATE=False` restores
+  the pushed file, and a rerun tops up missing stories per model.
+- Wired in by `one_shot_kaggle.py`: for `v2`/`pilot` it downloads the pairs to
+  `data/local.jsonl` and aborts if they are missing (unless `LOCAL_JSONL` is set).
+  `configs/{v2,pilot}.yaml` give `local_jsonl` 0.25 of the human and AI-foundational buckets
+  (~4,000 clean humans at the pilot, 20% of the human bucket).
+- Cost: ~30–60 min on one T4 for 4,000 stories × 2 generators; the dataset is then frozen and
+  reused by later runs. **A rebuilt news file is a data change: set `RESUME=False`.**
+
 ---
 
 ## 8. Metrics and how to report them
@@ -455,13 +493,14 @@ step-time spikes at checkpoint saves.
 
 | repo | contents |
 |---|---|
-| `Yashhh999/gradientTrace` | v1 model at root + `checkpoint-5607/`, `last-checkpoint/`, `eval_report.json`, `data_manifest.json`, README, `external_gate_v1.jsonl`, `external_gate_v1_meta.json`, `external_gate_v1_report_v1.json`, `external_gate_v1_report_v2-pilot.json`, `v2/raid_v2.jsonl`, `v2/raid_v2_meta.json` |
+| `Yashhh999/gradientTrace` | v1 model at root + `checkpoint-5607/`, `last-checkpoint/`, `eval_report.json`, `data_manifest.json`, README, `external_gate_v1.jsonl`, `external_gate_v1_meta.json`, `external_gate_v1_report_v1.json`, `external_gate_v1_report_v2-pilot.json`, `external_gate_v1_report_v2-pilot-fix.json`, `v2/raid_v2.jsonl`, `v2/raid_v2_meta.json`, `v2/news_pairs.jsonl`, `v2/news_pairs_meta.json` |
 | `Yashhh999/gradientTrace-v2` | target for the full v2 run |
 | `Yashhh999/gradientTrace-v2-pilot` | target for the 50k pilot |
 | `Yashhh999/gradientTrace-smoke` | smoke pushes only |
 
-Repos are private (`hub.private: true`); anonymous access is 401. A training run pushes the
-best model, `eval_report.json`, `data_manifest.json`, and a generated model card. With
+`Yashhh999/gradientTrace` and `-v2-pilot` are public (checked 2026-11-01); `-v2` is private
+(anonymous 401). The cells still authenticate for writes. A training run pushes the best
+model, `eval_report.json`, `data_manifest.json`, and a generated model card. With
 `checkpoint_strategy: checkpoint`, each save replaces `last-checkpoint/` (optimizer + scheduler
 state, ~4.4–5 GB per push).
 
@@ -492,7 +531,9 @@ state, ~4.4–5 GB per push).
 | torch_tpu “no extension module compatible” | torch outside 2.11–2.15 | reinstall a supported torch build (cell handles 2.14.1) |
 | internal AUROC 0.9999 but humans flagged | source confounding | ignore internal numbers; run the gate |
 | gate flags ~97% of humans as AI; pooled AUROC ~0.5-0.6 | a source's labels are inverted (MAGE ships 1 = human, 0 = machine) | use `mage`, not `hf:yaful/MAGE`; check every new source's label convention |
-| gate ~0.96 on reviews but ~0.48 on news, 97% of news humans flagged | training humans are perturbed in news/reddit/books/poetry, clean only in reviews/wiki/recipes; AI is clean everywhere | clean human rows per domain (rebuild the RAID human side) |
+| gate ~0.96 on reviews but ~0.48 on news, 97% of news humans flagged | training humans are perturbed in news/reddit/books/poetry, clean only in reviews/wiki/recipes; AI is clean everywhere | train on the paired clean-news set (`colab/build_news.py`); it is downloaded automatically into `data/local.jsonl` |
+| `paired clean news missing` when the training cell starts | `v2/news_pairs.jsonl` has not been built/pushed, or `NEWS_HUB` is wrong | run `colab/build_news.py` (it appends/pushes partials), or point `LOCAL_JSONL` at your own paired file |
+| news builder ends with one generator | a model architecture is unsupported by the installed transformers | read the printed load error; the cell falls back through `GEN_MODELS`; one generator is still usable, two are better |
 
 ---
 
@@ -516,8 +557,9 @@ state, ~4.4–5 GB per push).
   0.5745 / 0.0263 / 0.9675; fixed pilot 0.7258 / 0.1288 / 0.5463, but news alone 0.4775 /
   0.0125 / 0.9700 (§7.5). All unusable. The dataset is frozen and stays the comparison.
 - **v2 data:** RAID slice healthy (71,297 rows; 18,848 humans in 7 domains; poetry held out).
-  `configs/v2.yaml` and `configs/pilot.yaml` use hc3 + mage + arena + RAID, source quotas,
-  grouped splits, humanized cap, held-out poetry.
+  `configs/v2.yaml` and `configs/pilot.yaml` use hc3 + mage + arena + RAID + `local_jsonl`,
+  source quotas, grouped splits, humanized cap, held-out poetry; `local_jsonl` carries the
+  clean-news pairs.
 - **Pilot history:** pre-fix pilot (2026-10-31) ran 607 steps in 4,637 s with val 0.9972.
   Fixed pilot (2026-11-01) ran the same 607 steps in ~80 min: val 0.9966/0.937, in-domain
   0.9966/0.933, OOD 0.9993/0.987, humanized 0.9993/0.984, held-out poetry 0.9732/0.577.
@@ -532,14 +574,30 @@ state, ~4.4–5 GB per push).
   holdout), humanized 756, held-out poetry 5,060. hc3 pools 7,564/3,064, raid 12,064/13,564/
   2,381, arena 6,064 frontier; mage fills its share across the 9 non-yelp domains. Frontier
   supply is short (~8.4k of the 10k pilot target; ~20.4k of 30k at 150k); fix after the gate.
+- **Clean-human probe (2026-11-01):** the full RAID blocks confirm there are none to recover:
+  news 655,048 rows (8 attacks × 1,780 humans, 0 clean, 39,160 clean AI), reddit 625,221
+  (0 clean), books 591,329 (0 clean). Poetry hit Python's csv field limit (131,072) and the
+  probe stopped. The extractor's caps were not why the slice looked clean-less; RAID train
+  simply has no clean human news to give.
+- **Clean-news builder (2026-11-01):** `colab/build_news.py` pairs 4,000 CNN/DailyMail leads
+  with AI news from Phi-3-mini and Granite-2B using the gate's own prompt, and pushes
+  `v2/news_pairs.jsonl`. `one_shot_kaggle.py` downloads it into `data/local.jsonl` and refuses
+  to train without it; `configs/{v2,pilot}.yaml` give it 0.25 of the human and AI-foundational
+  buckets (~4,000 clean news humans = 20% of the pilot human bucket, so ~68% of that bucket is
+  now unperturbed).
 - **Next steps, in order:**
-  1. Probe the RAID news/reddit/books/poetry blocks for clean (`attack: none`) human rows by
-     scanning the full windows — the extractor stops as soon as its caps fill, so clean rows
-     may simply be further into the block. If they exist, make `build_raid.py` prefer clean
-     humans, rebuild the slice, and retrain the pilot.
-  2. If RAID has no clean humans in those domains, build paired clean-news data (human
-     BBC/CC-News articles plus a small open model writing on the same prompts) before training.
-  3. Only after the news slice moves, consider the 150k run — and fix the frontier supply first.
+  1. Run `colab/build_news.py` (fresh Kaggle GPU session, ~30–60 min for 4,000 stories × 2
+     generators). Check the printed counts and `v2/news_pairs_meta.json`; the file is frozen
+     and reused by every later run.
+  2. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) in a **fresh session**
+     (the builder's kernel can still hold GPU memory). Expect ~607 steps, ~80 min training plus
+     data build and final eval. Verify `manifest["train_sources"]` shows `local` with ~4k human
+     and ~4.5k AI rows, and that the human bucket still has hc3/mage/raid/local.
+  3. Gate it (`MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`, `MODEL_LABEL="v2-pilot-news"`,
+     `GATE_NAME="external_gate_v1"`, `REGENERATE=False`, `PUSH=True`). Success is the news
+     slice moving off 0.4775 / 0.0125 / 0.9700; report news first, then pooled (reviews is
+     Yelp-seen and will flatter the pooled line).
+  4. Only after the news slice moves, consider the 150k run — and fix the frontier supply first.
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---

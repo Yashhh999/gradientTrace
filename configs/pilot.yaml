@@ -55,7 +55,12 @@ data:
       ai_frontier: 0.80
     arena:
       ai_frontier: 0.40
-    local_jsonl: {}
+    # data/local.jsonl is the paired clean-news set from colab/build_news.py: RAID's news
+    # humans are all perturbed while its AI rows are clean, so without clean human news the
+    # model learns "clean prose = AI" and fails the gate's news slice.
+    local_jsonl:
+      human: 0.25
+      ai_foundational: 0.25
   local_jsonl: data/local.jsonl
   raid_jsonl: data/raid_v2.jsonl
   scan_limit_per_source: 400000

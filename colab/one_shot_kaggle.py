@@ -6,6 +6,7 @@ RUN = "smoke"                        # "smoke" (~10 min sanity) | "full" (real t
 CONFIG = "base"                      # base | v2 | pilot -> configs/<CONFIG>.yaml
 HUB_ID = ""                          # "" = per-CONFIG default (gradientTrace / -v2 / -v2-pilot)
 RAID_HUB = "Yashhh999/gradientTrace" # repo holding v2/raid_v2.jsonl from colab/build_raid.py
+NEWS_HUB = "Yashhh999/gradientTrace" # repo holding v2/news_pairs.jsonl from colab/build_news.py
 PUSH_SMOKE = False                   # also push the smoke model to "<HUB_ID>-smoke"
 MAX_STEPS = 0                        # full run: stop after this many optimizer steps per session
                                      # (RESUME keeps counting from the checkpoint); 0 = all EPOCHS
@@ -130,7 +131,7 @@ if push:
 if CONFIG in ("v2", "pilot"):  # paired RAID slice; build it once with colab/build_raid.py
     from huggingface_hub import hf_hub_download
 
-    assert os.environ.get("HF_TOKEN"), "HF_TOKEN is required to download the private RAID slice."
+    assert os.environ.get("HF_TOKEN"), "HF_TOKEN is required to download the RAID slice."
     os.makedirs(os.path.join(REPO_DIR, "data"), exist_ok=True)
     try:
         raid_src = hf_hub_download(
@@ -165,6 +166,43 @@ if CONFIG in ("v2", "pilot"):  # paired RAID slice; build it once with colab/bui
         f" ({rows} rows, {humans} human in {len(human_domains)} domains,"
         f" {os.path.getsize(raid_path) / 1e6:.1f} MB)"
     )
+
+    if not LOCAL_JSONL:  # clean paired news; without it the model re-learns "clean prose = AI"
+        try:
+            news_src = hf_hub_download(
+                repo_id=NEWS_HUB, filename="v2/news_pairs.jsonl", token=os.environ["HF_TOKEN"]
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"paired clean news missing: run colab/build_news.py with HUB_ID={NEWS_HUB}"
+                f" first, or set LOCAL_JSONL to your own paired file ({exc!r})"
+            ) from exc
+        news_path = os.path.join(REPO_DIR, "data/local.jsonl")
+        shutil.copy(news_src, news_path)
+        news_humans = news_ai = 0
+        news_generators = collections.Counter()
+        with open(news_path, encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if rec.get("label") == 0:
+                    news_humans += 1
+                elif rec.get("label") == 1:
+                    news_ai += 1
+                    news_generators[rec.get("generator")] += 1
+        if news_humans < 1000 or news_ai < 1000:
+            raise RuntimeError(
+                f"paired clean news at {NEWS_HUB}/v2/news_pairs.jsonl has {news_humans} human"
+                f" and {news_ai} AI rows; rebuild it with colab/build_news.py"
+            )
+        print(
+            f"[gradientTrace] news pairs <- {NEWS_HUB}/v2/news_pairs.jsonl"
+            f" ({news_humans} human, {news_ai} AI from {dict(news_generators)},"
+            f" {os.path.getsize(news_path) / 1e6:.1f} MB)"
+        )
+        if len(news_generators) < 2:
+            print("[gradientTrace] warning: one news generator only; the paired AI side is less diverse")
 
 import torch  # safe here: only the TPU runtime cares about a kernel-side torch import
 

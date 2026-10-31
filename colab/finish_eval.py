@@ -158,7 +158,7 @@ if PUSH and RESUME_PARTIAL and not partial_path.is_file():
         from huggingface_hub import hf_hub_download
 
         fetched = hf_hub_download(
-            HUB_ID, "eval_partial.json", repo_id=HUB_ID, token=os.environ["HF_TOKEN"]
+            repo_id=HUB_ID, filename="eval_partial.json", token=os.environ["HF_TOKEN"]
         )
         partial_path.write_text(Path(fetched).read_text(encoding="utf-8"), encoding="utf-8")
         print("[finish] restored eval_partial.json from the Hub", flush=True)

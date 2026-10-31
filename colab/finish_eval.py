@@ -276,3 +276,10 @@ if PUSH:
     )
 
 print(f"\n[finish] done in {time.time() - T0:.0f}s", flush=True)
+
+# keep GPU 0 clean: a training cell in this same kernel would otherwise OOM at step 0
+import gc  # noqa: E402
+
+del model
+gc.collect()
+torch.cuda.empty_cache()

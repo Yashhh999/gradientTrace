@@ -460,7 +460,8 @@ state, ~4.4–5 GB per push).
 | RAID slice has almost no humans | stale pre-fix slice (the first one had 1,233 in 3 domains) | rebuild with `build_raid.py`; the cell aborts below 10k humans or 7 domains |
 | RAID domain has 0 rows | wrong byte window | do not mark complete; re-probe the window |
 | eval is silent for hours | fp32 full eval (~3h on one T4) | use `finish_eval.py` (fp16, per-slice progress, Hub partials) |
-| GPU busy / OOM after restart | old torchrun still holds the T4s | `pkill -f torch.distributed.run`; `pkill -f kaggle_launch.py`; delete `runs/` |
+| OOM at the first `optimizer.step()`, message names another PID | the notebook kernel still holds an in-kernel gate/eval model on GPU 0 (it survives the cell) | restart the session; killing torchrun does **not** free the kernel; the cell aborts if GPU 0 has <13 GiB free |
+| GPU busy after restart, no free memory | orphaned torchrun from a crashed cell | `pkill -f torch.distributed.run`; `pkill -f kaggle_launch.py`; delete `runs/` |
 | eval OOM | batch too large | gate/finish halve the batch automatically; training needs a smaller micro batch |
 | TPU child exits 1 silently | kernel imported torch / torch_xla present | never import torch in the TPU kernel; remove torch_xla; restart session |
 | `PjRt … premapped_buffer_size` | libtpu too old (torch_xla pin) | restore the libtpu `torch_tpu` declares |
@@ -480,13 +481,24 @@ state, ~4.4–5 GB per push).
 - **v2 data:** RAID slice rebuilt and healthy (73,500 rows; 21k humans; poetry held out).
   `configs/v2.yaml` and `configs/pilot.yaml` use hc3 + MAGE + arena + RAID, source quotas,
   grouped splits, humanized cap, held-out poetry.
-- **Pilot:** the 50k / 1-epoch pilot has not yet completed a training run. One attempt died
-  inside torchrun (rank 0 exit 1, rank 1 SIGTERM) and the rank-0 traceback was lost; the Kaggle
-  cell now runs a Hub preflight and reprints the child traceback. The v2 selection path was
-  exercised offline with synthetic pools and ran to completion; evaluation handles empty slices.
+- **Pilot:** the 50k / 1-epoch pilot has not yet completed a training run. The first attempt
+  died with its traceback lost. The second attempt (logged 2026-10-31) built data cleanly and
+  then hit a CUDA OOM at the first `optimizer.step()`: GPU 0 held the notebook kernel's
+  6.58 GiB (PID 49, an in-kernel gate/eval model from an earlier cell) plus rank 0's 7.97 GiB,
+  i.e. 14.55 of 14.56 GiB, so the 16 MiB Adam state allocation failed. This is not a data,
+  token, or Hub problem. The cell now preflights the Hub, reprints the child traceback,
+  refuses a stale RAID slice, and aborts if GPU 0 has <13 GiB free; the gate and finish-eval
+  scripts free their model at exit.
+- **Pilot data build (same log):** train 38,792 / val 5,089; slices 4,564 in-domain, 11,900
+  OOD, 756 humanized, 5,060 held-out domain. Buckets 16,100 human / 15,989 foundational /
+  6,703 frontier — about 8.4k of the 10k frontier target (arena's per-source cap of 6,064 plus
+  RAID's 2,381 frontier rows). At 150k the 30k frontier target can only reach ~20.4k from the
+  same sources; raise arena's frontier share or rebuild RAID with higher caps after the gate.
 - **Next steps, in order:**
-  1. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`; expect 625 steps,
-     checkpoints at 300 and 600, ~80–90 min training plus data build and final eval).
+  1. Restart the Kaggle session (to free the kernel's GPU memory), then rerun the pilot
+     (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`; expect ~607 steps, checkpoints at 300
+     and 600, ~80–90 min training plus data build and final eval). Nothing to resume — the
+     crash was at step 0.
   2. Gate the pilot with the frozen dataset: `MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`,
      `MODEL_LABEL="v2-pilot"`, `GATE_NAME="external_gate_v1"`, `REGENERATE=False`, `PUSH=True`.
   3. Compare pooled TPR@1% FPR / AUROC against the v1 baseline before committing to the full

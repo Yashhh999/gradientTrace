@@ -596,3 +596,10 @@ if PUSH and api is not None:
     )
 
 print(f"\n[gate] done in {time.time() - T0:.0f}s", flush=True)
+
+# keep GPU 0 clean: a training cell in this same kernel would otherwise OOM at step 0
+import gc  # noqa: E402
+
+del detector
+gc.collect()
+torch.cuda.empty_cache()

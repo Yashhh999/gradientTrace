@@ -174,6 +174,15 @@ print(
     f"[gradientTrace] {world} x {torch.cuda.get_device_name(0)} | torch {torch.__version__}"
     f" | global batch {MICRO_BATCH * GRAD_ACCUM * world}"
 )
+free_gib, total_gib = (value / 2**30 for value in torch.cuda.mem_get_info(0))
+print(f"[gradientTrace] GPU 0 free {free_gib:.1f}/{total_gib:.1f} GiB before launch", flush=True)
+if free_gib < 13.0:  # a clean T4 shows ~14 GiB; less means an earlier in-kernel model is resident
+    raise RuntimeError(
+        f"GPU 0 has only {free_gib:.1f} GiB free. This notebook kernel is still holding GPU "
+        "memory (usually a gate/eval model from an earlier cell in the same session). "
+        "Restart the session (Run > Restart session) and re-run this cell; killing torchrun "
+        "alone will not free the kernel's memory."
+    )
 
 if LOCAL_JSONL:
     os.makedirs(os.path.join(REPO_DIR, "data"), exist_ok=True)

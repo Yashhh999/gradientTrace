@@ -1,7 +1,8 @@
 # gradientTrace v2 - diverse, paired, humanised training data
 # Same backbone and schedule as base.yaml; the change is the data mix:
 #   * pile (essay-mill "human" text) is gone
-#   * hc3 keeps prompt-paired Q&A, MAGE adds natural Reddit CMV posts
+#   * hc3 keeps prompt-paired Q&A, mage adds clean human/AI pairs across 10 domains
+#     (yelp stays out: it is the external gate's reviews source)
 #   * raid (extracted by colab/build_raid.py) adds paired news/reviews/reddit/wiki/books
 #     generations, frontier models and paraphrase/synonym humanised AI
 #   * poetry is held out of training and used as a domain-generalisation slice
@@ -43,15 +44,16 @@ data:
   val_frac: 0.10
   test_frac: 0.10
   max_humanized_frac: 0.25
-  held_out_generators: [llama-2, mistral, gemini]
+  held_out_generators: [llama-2, mistral, gemini, qwen]
   frontier_patterns: [gpt-4, gpt-5, gpt4, o1, o3, claude, gemini, grok, llama-3, llama3, mistral-large, deepseek, qwen, command-r]
-  sources: [hc3, "hf:yaful/MAGE", arena, raid, local_jsonl]
+  # mage is a dedicated loader (MAGE's raw label 1 = human) and excludes the yelp split.
+  sources: [hc3, mage, arena, raid, local_jsonl]
   # Upper bounds on each source's share of a bucket; spare capacity fills shortfalls.
   source_shares:
     hc3:
       human: 0.25
       ai_foundational: 0.10
-    "hf:yaful/MAGE":
+    mage:
       human: 0.35
       ai_foundational: 0.30
     raid:

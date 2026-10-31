@@ -6,6 +6,7 @@ Samples from `held_out_generators` never enter training; they form the OOD test.
 
 Source schema:
   hc3          Hello-SimpleAI/HC3 (question + human_answers + chatgpt_answers)
+  mage         yaful/MAGE (raw label 1 = human, 0 = machine; src = domain + generator)
   pile         artem9k/ai-text-detection-pile (text + source)
   arena        lmarena-ai/arena-human-preference-55k (model_a/model_b + response_a/b)
   local_jsonl  data/local.jsonl with keys:
@@ -35,6 +36,10 @@ _HC3_JSONL = "https://huggingface.co/datasets/Hello-SimpleAI/HC3/resolve/main/al
 # The only public source we have of text labelled by frontier generator: each
 # arena conversation names the model behind each side.
 _ARENA = "lmarena-ai/arena-human-preference-55k"
+_MAGE = "yaful/MAGE"
+# The external gate draws its reviews humans from Yelp; MAGE's yelp split is the
+# same corpus, so training on it would turn the gate into a memorisation test.
+_MAGE_SKIP_DOMAINS = {"yelp"}
 
 
 @dataclass
@@ -102,6 +107,50 @@ def load_hc3(cfg: Config, scan_limit: int) -> Iterator[Sample]:
             yield Sample(norm_text(answer), 0, "human", "hc3", prompt=prompt, domain=domain, bucket="human")
         for answer in (row.get("chatgpt_answers") or [])[:2]:
             yield Sample(norm_text(answer), 1, "chatgpt", "hc3", prompt=prompt, domain=domain)
+
+
+def _mage_src_parts(src: str) -> tuple[str, str]:
+    """Split MAGE's src into (domain, generator), e.g. cmv_human or cmv_machine_topical_gpt-3.5-trubo."""
+    if src.endswith("_human"):
+        return src[: -len("_human")] or "general", "human"
+    marker = "_machine_"
+    if marker in src:
+        domain, tail = src.split(marker, 1)
+        for prefix in ("continuation_", "specified_", "topical_"):
+            if tail.startswith(prefix):
+                tail = tail[len(prefix):]
+                break
+        return domain or "general", tail or "unknown"
+    return src or "general", "unknown"
+
+
+def load_mage(cfg: Config, scan_limit: int) -> Iterator[Sample]:
+    from datasets import load_dataset
+
+    # MAGE is grouped by src on disk; shuffling keeps one domain (cmv, eli5, yelp)
+    # from filling the pool before the rest of the mixture is ever seen.
+    LOG.info("MAGE: loading and shuffling the train split")
+    ds = load_dataset(_MAGE, split="train").shuffle(seed=cfg.seed)
+    for i, row in enumerate(ds):
+        if i >= scan_limit:
+            return
+        raw = row.get("label")
+        if raw not in (0, 1):
+            continue
+        src = str(row.get("src") or "")
+        domain, generator = _mage_src_parts(src)
+        if domain in _MAGE_SKIP_DOMAINS:
+            continue
+        # The MAGE CSVs label 1 for human-written and 0 for machine-generated.
+        # The generic hf: adapter assumes the opposite and inverted v1/v2 training.
+        label = 0 if raw == 1 else 1
+        yield Sample(
+            text=norm_text(row.get("text") or ""),
+            label=label,
+            generator="human" if label == 0 else generator,
+            source="mage",
+            domain=domain,
+        )
 
 
 def load_pile(cfg: Config, scan_limit: int) -> Iterator[Sample]:
@@ -308,6 +357,8 @@ def load_generic(spec: str, cfg: Config, scan_limit: int) -> Iterator[Sample]:
 def _make_loader(spec: str, cfg: Config):
     if spec == "hc3":
         return load_hc3
+    if spec == "mage":
+        return load_mage
     if spec == "pile":
         return load_pile
     if spec == "arena":

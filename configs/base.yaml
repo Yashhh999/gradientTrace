@@ -41,8 +41,9 @@ data:
   held_out_generators: [llama-2, mistral, gemini]   # never trained on; OOD test only
   frontier_patterns: [gpt-4, gpt-5, gpt4, o1, o3, claude, gemini, grok, llama-3, llama3, mistral-large, deepseek, qwen, command-r]
   # arena is the only public generator-labelled frontier text (model_a/model_b);
-  # MAGE tops up ai_foundational across domains. Both stream from the hub.
-  sources: [hc3, pile, hf:yaful/MAGE, arena, local_jsonl]   # or hf:<org/name>[:split] for any hub dataset
+  # mage adds clean human/AI pairs across 10 domains. Both come from the hub.
+  # mage is a dedicated loader: MAGE labels 1 = human and 0 = machine.
+  sources: [hc3, pile, mage, arena, local_jsonl]   # or hf:<org/name>[:split] for any hub dataset
   local_jsonl: data/local.jsonl       # prompt-paired frontier/humanized data goes here
   scan_limit_per_source: 400000
   ood_cap: 8000

@@ -120,7 +120,7 @@ from gradienttrace.data import build_datasets  # noqa: E402
 from gradienttrace.evaluate import evaluate_slices, load_model_and_tokenizer  # noqa: E402
 from gradienttrace.runtime import detect_runtime, resolve_device  # noqa: E402
 
-stage("building eval data (streams hc3 / pile / MAGE / arena; ~10-20 min)")
+stage("building eval data (hc3 / pile / mage / arena; ~10-20 min)")
 cfg = load_config("configs/base.yaml")
 runtime = detect_runtime()
 device = resolve_device(runtime)

@@ -18,10 +18,11 @@ real runs, and the current state of the work. Update this file when behavior cha
   on every internal slice because the slices are source-confounded (domain equals label).
   A probe showed it flags ordinary human news/reviews as AI ~95–99% of the time.
   The only acceptance signal is the external gate (`colab/external_gate.py`).
-- **Current phase (2026-10-31):** v2 data work is done (RAID slice rebuilt and healthy);
-  the 50k one-epoch pilot has not yet completed a successful training run. The external
-  gate on v1 is the recorded baseline. Do not start the full 150k v2 run until the pilot
-  passes the gate.
+- **Current phase (2026-10-31):** the pilot trained and the external gate exposed a data bug:
+  `hf:yaful/MAGE` mapped MAGE's `label` (1 = human, 0 = machine) as if 1 = AI, so both v1 and
+  the pilot trained on ~11k inverted clean texts. A dedicated `mage` loader (correct labels,
+  domain/generator from `src`, yelp excluded, train split shuffled) is in place. Re-run the
+  50k pilot before any full v2 run.
 
 ---
 
@@ -87,7 +88,7 @@ gradienttrace/
   train.py      HF Trainer pipeline, resume, Hub checkpoints, final slice eval
   evaluate.py   standalone sliced evaluation, predict_probs
 configs/
-  base.yaml     v1 recipe (hc3 + pile + MAGE + arena)
+  base.yaml     v1 recipe (hc3 + pile + mage + arena)
   v2.yaml       paired recipe + RAID + held-out domain poetry
   pilot.yaml    50k / 1 epoch pilot of the v2 recipe
 colab/
@@ -174,9 +175,10 @@ and log a warning (they do not crash). Single-class slices produce NaN AUROC.
 | spec | loader | notes |
 |---|---|---|
 | `hc3` | streaming `Hello-SimpleAI/HC3` `all.jsonl` | question + up to 2 human + 2 ChatGPT answers; prompt-paired; domain from `source` |
+| `mage` | `yaful/MAGE` train split, loaded then shuffled | raw `label` is 1 = human, 0 = machine (the opposite of this pipeline); `src` is `<domain>_human` or `<domain>_machine_<prompt>_<model>`; yelp excluded because it is the gate's reviews source |
 | `pile` | `artem9k/ai-text-detection-pile` | `source` column only distinguishes human vs ai; no generator, no prompt. v1 only — **not in v2/pilot** |
 | `arena` | `lmarena-ai/arena-human-preference-55k` | `model_a/b`, `response_a/b` (JSON-list strings per turn); only public generator-labelled frontier source; domain `chat` |
-| `hf:<org/name>[:split]` | generic adapter | auto-detects text/label/generator/prompt/domain columns; MAGE tops up `ai_foundational` |
+| `hf:<org/name>[:split]` | generic adapter | auto-detects text/label/generator/prompt/domain columns; it assumes `label` 1 = AI, so check the dataset card before using it |
 | `raid` | `cfg.data.raid_jsonl` | paired human/model rows, `variant` raw/humanized, `attack`, `group`; see 5.5 |
 | `local_jsonl` | `cfg.data.local_jsonl` | user-supplied paired data; see schema below |
 
@@ -194,7 +196,7 @@ raises immediately from `_make_loader`, before that per-source try block.
 | source | human | ai_foundational | ai_frontier |
 |---|---|---|---|
 | hc3 | 0.25 | 0.10 | — |
-| hf:yaful/MAGE | 0.35 | 0.30 | — |
+| mage | 0.35 | 0.30 | — |
 | raid | 0.40 | 0.45 | 0.80 |
 | arena | — | — | 0.40 |
 | local_jsonl | — | — | — |
@@ -268,7 +270,7 @@ All configs share the model/schedule; only data and Hub targets differ.
 | | base (v1) | v2 | pilot |
 |---|---|---|---|
 | samples / epochs | 150k / 3 | 150k / 3 | 50k / 1 |
-| sources | hc3, pile, MAGE, arena, local | hc3, MAGE, arena, raid, local | same as v2 |
+| sources | hc3, pile, mage, arena, local | hc3, mage, arena, raid, local | same as v2 |
 | shares | none | per 5.3 | per 5.3 |
 | RAID | no | `data/raid_v2.jsonl` | same |
 | held-out domain | — | poetry | poetry |
@@ -357,9 +359,9 @@ evaluates the v2 slices at the end of a run; use this cell mainly to finish a ki
 The acceptance test. It builds a **frozen** matched dataset and scores any detector on it:
 
 - Humans: 400 `fancyzhx/ag_news` test (news) + 400 `Yelp/yelp_review_full` test (reviews).
-- AI: `Qwen/Qwen2.5-3B-Instruct` (unseen in training) writes one response per human sample,
-  using the human's snippet as the topic and matching its length; sampling T=0.8, top_p=0.9,
-  batch 8.
+- AI: `Qwen/Qwen2.5-3B-Instruct` (unseen in training; RAID's qwen-1.5 rows are held out)
+  writes one response per human sample, using the human's snippet as the topic and matching
+  its length; sampling T=0.8, top_p=0.9, batch 8.
 - Frozen as `external_gate_v1.jsonl` on `Yashhh999/gradientTrace` and restored on later runs, so
   every model is scored on identical text.
 - Metrics per genre and pooled: AUROC, TPR at a human-calibrated 1% FPR (headline), TPR/FPR at
@@ -378,6 +380,16 @@ Recorded baseline (`external_gate_v1_report_v1.json`, 2026-10-31):
 | pooled | 800 | 0.5270 | 0.0000 | 0.9750 | 0.4313 | 0.5428 |
 
 Interpretation: v1 is unusable outside its training sources. TPR@1% FPR is the number to quote.
+
+First v2 pilot (`external_gate_v1_report_v2-pilot.json`, 2026-10-31): pooled AUROC 0.5745,
+TPR@1% FPR 0.0263, FPR@0.5 0.9675, pairwise 0.5950, matched AUROC 0.5903; news 0.5685,
+reviews 0.6345. Directionally better than v1 but unusable (96.75% of human texts still score
+above 0.5). The pilot trained with MAGE labels inverted (see §11), so this is not a clean
+measurement of the recipe; the next pilot supersedes it.
+
+Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp, so the
+reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
+human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
 
 ### 7.6 RAID extractor (`colab/build_raid.py`)
 
@@ -432,7 +444,7 @@ step-time spikes at checkpoint saves.
 
 | repo | contents |
 |---|---|
-| `Yashhh999/gradientTrace` | v1 model at root + `checkpoint-5607/`, `last-checkpoint/`, `eval_report.json`, `data_manifest.json`, README, `external_gate_v1.jsonl`, `external_gate_v1_meta.json`, `external_gate_v1_report_v1.json`, `v2/raid_v2.jsonl`, `v2/raid_v2_meta.json` |
+| `Yashhh999/gradientTrace` | v1 model at root + `checkpoint-5607/`, `last-checkpoint/`, `eval_report.json`, `data_manifest.json`, README, `external_gate_v1.jsonl`, `external_gate_v1_meta.json`, `external_gate_v1_report_v1.json`, `external_gate_v1_report_v2-pilot.json`, `v2/raid_v2.jsonl`, `v2/raid_v2_meta.json` |
 | `Yashhh999/gradientTrace-v2` | target for the full v2 run |
 | `Yashhh999/gradientTrace-v2-pilot` | target for the 50k pilot |
 | `Yashhh999/gradientTrace-smoke` | smoke pushes only |
@@ -468,41 +480,53 @@ state, ~4.4–5 GB per push).
 | `PjRt … premapped_buffer_size` | libtpu too old (torch_xla pin) | restore the libtpu `torch_tpu` declares |
 | torch_tpu “no extension module compatible” | torch outside 2.11–2.15 | reinstall a supported torch build (cell handles 2.14.1) |
 | internal AUROC 0.9999 but humans flagged | source confounding | ignore internal numbers; run the gate |
+| gate flags ~97% of humans as AI; pooled AUROC ~0.5-0.6 | a source's labels are inverted (MAGE ships 1 = human, 0 = machine) | use `mage`, not `hf:yaful/MAGE`; check every new source's label convention |
 
 ---
 
 ## 11. Current status (2026-10-31)
 
+- **Root cause of the gate failure (found 2026-10-31):** `yaful/MAGE` labels 1 = human and
+  0 = machine, while the generic `hf:` adapter assumes 1 = AI. `hf:yaful/MAGE` therefore fed
+  ~5.6k clean human texts (cmv/eli5/…) into the AI bucket and ~5.6k machine texts into the
+  human bucket in both v1 and the pilot; its `src` (domain + generator) was ignored. This is
+  the "clean prose = AI" prior behind the gate's 96.75% human false-positive rate.
+- **Fix:** a dedicated `mage` loader flips the labels, parses `src` into domain/generator,
+  excludes the yelp split (the gate's reviews source), shuffles the train split so one domain
+  cannot fill the pool, and `qwen` is held out (RAID ships qwen-1.5, the gate uses Qwen2.5).
+  `configs/{base,v2,pilot}.yaml` now list `mage`.
 - **v1 model:** trained to step 5,607 (~1 epoch, early-stopped), on the Hub. Internal eval:
   val 0.99998 / test_indomain 0.99995 / OOD 0.99999 AUROC, val threshold 0.9993,
   `test_humanized` empty. A probe scored unseen human ag_news at mean P(AI) 0.9553
-  (95% above 0.9) and Yelp at 0.9950 (99.5% above 0.9). **Not shippable.**
-- **External gate v1:** pooled AUROC 0.5270, TPR@1% FPR 0.0000, FPR@0.5 0.9750 (§7.5 table).
-  This is the honest baseline for v2.
-- **v2 data:** RAID slice rebuilt and healthy (71,297 rows; 18,848 humans in 7 domains; poetry
-  held out).
-  `configs/v2.yaml` and `configs/pilot.yaml` use hc3 + MAGE + arena + RAID, source quotas,
+  (95% above 0.9) and Yelp at 0.9950 (99.5% above 0.9). **Not shippable**, and its gate
+  numbers are partly explained by the MAGE inversion; not a clean baseline for the recipe.
+- **External gate v1:** v1 pooled AUROC 0.5270, TPR@1% FPR 0.0000, FPR@0.5 0.9750; first
+  pilot pooled 0.5745 / 0.0263 / 0.9675 (§7.5). Both unusable. The dataset is frozen and
+  stays the comparison.
+- **v2 data:** RAID slice healthy (71,297 rows; 18,848 humans in 7 domains; poetry held out).
+  `configs/v2.yaml` and `configs/pilot.yaml` use hc3 + mage + arena + RAID, source quotas,
   grouped splits, humanized cap, held-out poetry.
-- **Pilot (2026-10-31):** completed. 607 steps (1 epoch at global 64), 4,637 s of training,
-  fp16 on 2×T4; val AUROC 0.9957 at step 300 and 0.9972 at step 600 (TPR@1% 0.9498). Best
-  model + `eval_report.json` + `data_manifest.json` + README pushed to
-  `Yashhh999/gradientTrace-v2-pilot`. Final slice eval: val 5,089 → 0.9972/0.950;
-  test_indomain 4,564 → 0.9946/0.913; test_ood_generators 11,900 → 0.9986/0.982;
-  test_humanized 756 → 0.9960/0.955; test_heldout_domain 5,060 → **0.7512/0.172**. The
-  held-out domain (poetry) is the weak spot; internal numbers are still not detection quality.
-- **Pilot data build (same log):** train 38,792 / val 5,089; slices 4,564 in-domain, 11,900
-  OOD, 756 humanized, 5,060 held-out domain. Buckets 16,100 human / 15,989 foundational /
-  6,703 frontier — about 8.4k of the 10k frontier target (arena's per-source cap of 6,064 plus
-  RAID's 2,381 frontier rows). At 150k the 30k frontier target can only reach ~20.4k from the
-  same sources; raise arena's frontier share or rebuild RAID with higher caps after the gate.
+- **Pilot (2026-10-31):** completed 607 steps in 4,637 s; best val AUROC 0.9972 at step 600
+  (TPR@1% 0.9498). Final slices: val 0.9972/0.950, in-domain 0.9946/0.913, OOD generators
+  0.9986/0.982, humanized 0.9960/0.955, held-out domain (poetry) 0.7512/0.172. The weights
+  are on the Hub but invalid for a clean comparison until the pilot is rerun with the fixed
+  MAGE labels.
+- **Pilot data build (pre-fix):** train 38,792 / val 5,089; buckets 16,100 human / 15,989
+  foundational / 6,703 frontier; sources MAGE 11,317 / raid 16,818 / hc3 5,870 / arena 4,787.
+  These counts are obsolete. The next manifest must show mage domains (cmv, eli5, hswag,
+  roct, sci_gen, squad, tldr, wp, xsum) and no `hf:yaful/MAGE` key; the human bucket now
+  contains ~5.6k more real humans. Frontier supply remains short (~20.4k of the 30k target
+  at 150k); fix that after the gate.
 - **Next steps, in order:**
-  1. Gate the pilot with the frozen dataset: `MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`,
-     `MODEL_LABEL="v2-pilot"`, `GATE_NAME="external_gate_v1"`, `REGENERATE=False`, `PUSH=True`.
-  2. Compare pooled TPR@1% FPR / AUROC against the v1 baseline (0.0000 / 0.5270). A TPR still
-     at 0 means the data change did not help; a clear move means proceed. Fix the frontier
-     supply before the full run.
-  3. If the gate passes, run the full 150k v2 recipe (`Yashhh999/gradientTrace-v2`, ~12h on
-     2×T4, ~30h on v5e-1) and gate that model the same way.
+  1. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) — the data changed, so
+     the old checkpoint is invalid. Expect ~607 steps, ~80-90 min training plus data build and
+     final eval.
+  2. Gate it with `MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`,
+     `MODEL_LABEL="v2-pilot-fix"`, `GATE_NAME="external_gate_v1"`, `REGENERATE=False`,
+     `PUSH=True`. Compare pooled and news TPR@1% FPR / AUROC; news is the cleaner human-source
+     slice, and reviews is Yelp-seen via RAID.
+  3. Only if the gate moves, commit to the full 150k v2 run (`Yashhh999/gradientTrace-v2`,
+     ~12h on 2×T4, ~30h on v5e-1) after fixing the frontier supply.
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---
@@ -520,6 +544,7 @@ state, ~4.4–5 GB per push).
 - **Changes that touch data:** bump the config/Hub target, set `RESUME=False`, and verify
   `manifest["splits"]`, `manifest["train_buckets"]`, `manifest["train_sources"]`, and the
   OOD/humanized/held-out slice sizes. A data change invalidates every existing checkpoint.
+  Check a new source's label convention before wiring it in; MAGE ships 1 = human, not 1 = AI.
 - **Changes that touch the cell:** keep `colab/*.py` importable/compilable, update this file, and
   remember the notebook clones GitHub — push before telling the user to run.
 - **Do not** print tokens, disable TLS checks, add `--no-verify`, or commit artifacts.

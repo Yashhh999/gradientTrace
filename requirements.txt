@@ -10,3 +10,4 @@ sentencepiece>=0.1.99
 protobuf>=4.25
 safetensors>=0.4
 tensorboard>=2.16
+tqdm>=4.66

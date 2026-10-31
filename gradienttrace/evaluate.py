@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -17,17 +18,12 @@ from .runtime import detect_runtime, resolve_device
 LOG = logging.getLogger("gradienttrace.evaluate")
 
 
-def _iter_batches(samples, tokenizer, max_length, batch_size, pad_to_max):
-    for i in range(0, len(samples), batch_size):
-        chunk = samples[i : i + batch_size]
-        enc = tokenizer(
-            [s.text for s in chunk],
-            truncation=True,
-            max_length=max_length,
-            padding="max_length" if pad_to_max else True,
-            return_tensors="pt",
-        )
-        yield enc, chunk
+def _progress(total: int, desc: str):
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return None
+    return tqdm(total=total, desc=desc, unit="batch", dynamic_ncols=True)
 
 
 def predict_probs(
@@ -38,22 +34,57 @@ def predict_probs(
     max_length: int = 512,
     batch_size: int = 16,
     pad_to_max: bool = False,
+    desc: str = "eval",
 ) -> np.ndarray:
     import torch
 
     model.eval()
-    chunks: list[np.ndarray] = []
-    is_xla = str(device).startswith("xla")
+    device = torch.device(device)
+    count = len(samples)
+    probs = np.zeros(count, dtype=np.float32)
+    if count == 0:
+        return probs
+
+    # Length-sorted batches keep padding low with dynamic padding, which is
+    # several times cheaper than padding every batch to max_length.
+    order = sorted(range(count), key=lambda i: len(samples[i].text))
+    starts = range(0, count, batch_size)
+    batches = len(starts)
+    use_amp = device.type == "cuda"
+    is_xla = device.type == "xla"
+    bar = _progress(batches, desc)
+    report_every = max(1, batches // 20)
+    started = time.monotonic()
+
     with torch.inference_mode():
-        for enc, _ in _iter_batches(samples, tokenizer, max_length, batch_size, pad_to_max):
+        for step, start in enumerate(starts, 1):
+            index = order[start : start + batch_size]
+            enc = tokenizer(
+                [samples[i].text for i in index],
+                truncation=True,
+                max_length=max_length,
+                padding="max_length" if pad_to_max else True,
+                return_tensors="pt",
+            )
             enc = {k: v.to(device) for k, v in enc.items()}
-            logits = model(**enc).logits
-            chunks.append(torch.sigmoid(logits.float()).cpu().numpy())
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                logits = model(**enc).logits.float()
+            if use_amp and not torch.isfinite(logits).all():
+                with torch.autocast(device_type="cuda", enabled=False):
+                    logits = model(**enc).logits.float()
+            probs[index] = torch.sigmoid(logits).reshape(-1).cpu().numpy()
             if is_xla:
                 import torch_xla.core.xla_model as xm
 
                 xm.mark_step()
-    return np.concatenate(chunks) if chunks else np.zeros((0,), dtype=np.float32)
+            if bar is not None:
+                bar.update(1)
+            elif step % report_every == 0 or step == batches:
+                LOG.info("%s: %d/%d batches (%.0fs)", desc, step, batches, time.monotonic() - started)
+
+    if bar is not None:
+        bar.close()
+    return probs
 
 
 def evaluate_slices(
@@ -71,18 +102,22 @@ def evaluate_slices(
             report[name] = {"overall": {"n": 0}}
             LOG.warning("slice '%s' is empty", name)
             continue
-        probs = predict_probs(model, tokenizer, samples, device, max_length, batch_size, pad_to_max)
+        started = time.monotonic()
+        probs = predict_probs(
+            model, tokenizer, samples, device, max_length, batch_size, pad_to_max, desc=f"eval {name}"
+        )
         labels = np.array([s.label for s in samples])
         generators = np.array([s.generator for s in samples])
         domains = np.array([s.domain for s in samples])
         report[name] = sliced_report(labels, probs, {"generator": generators, "domain": domains})
         overall = report[name]["overall"]
         LOG.info(
-            "slice %-22s n=%6d auroc=%s tpr@1%%fpr=%s",
+            "slice %-22s n=%6d auroc=%s tpr@1%%fpr=%s (%.0fs)",
             name,
             overall.get("n", 0),
             _fmt(overall.get("auroc")),
             _fmt(overall.get("tpr_at_fpr_0.01"), ".3f"),
+            time.monotonic() - started,
         )
     return report
 

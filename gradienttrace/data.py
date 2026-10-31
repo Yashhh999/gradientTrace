@@ -47,6 +47,7 @@ class Sample:
     domain: str = "general"
     variant: str = "raw"
     bucket: str = ""
+    group: str = ""
 
 
 @dataclass
@@ -70,7 +71,9 @@ def text_key(text: str) -> str:
 
 
 def group_key(sample: Sample, seed: int) -> int:
-    if sample.prompt:
+    if sample.group:
+        base = f"group|{sample.group}"
+    elif sample.prompt:
         base = f"{norm_text(sample.prompt).lower()}|{sample.domain}"
     else:
         base = text_key(sample.text)
@@ -183,9 +186,51 @@ def load_local_jsonl(cfg: Config, scan_limit: int) -> Iterator[Sample]:
                 domain=str(rec.get("domain") or "general"),
                 variant=str(rec.get("variant") or "raw"),
                 bucket=str(rec.get("bucket") or ""),
+                group=str(rec.get("group") or ""),
             )
     if bad:
         LOG.warning("local_jsonl: skipped %d malformed records", bad)
+
+
+def _iter_jsonl(path: Path, scan_limit: int) -> Iterator[dict]:
+    if not path.exists():
+        LOG.info("%s not found; skipping", path)
+        return
+    bad = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for i, line in enumerate(handle):
+            if i >= scan_limit:
+                return
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                bad += 1
+                continue
+            if not isinstance(rec.get("text"), str) or rec.get("label") not in (0, 1):
+                bad += 1
+                continue
+            yield rec
+    if bad:
+        LOG.warning("%s: skipped %d malformed records", path, bad)
+
+
+def load_raid(cfg: Config, scan_limit: int) -> Iterator[Sample]:
+    for rec in _iter_jsonl(Path(cfg.data.raid_jsonl), scan_limit):
+        label = int(rec["label"])
+        yield Sample(
+            text=norm_text(rec["text"]),
+            label=label,
+            generator=str(rec.get("generator") or ("human" if label == 0 else "unknown")),
+            source="raid",
+            prompt=str(rec.get("prompt") or ""),
+            domain=str(rec.get("domain") or "general"),
+            variant=str(rec.get("variant") or "raw"),
+            bucket=str(rec.get("bucket") or ""),
+            group=str(rec.get("group") or ""),
+        )
 
 
 def _parse_generic(spec: str) -> tuple[str, str | None, str]:
@@ -269,6 +314,8 @@ def _make_loader(spec: str, cfg: Config):
         return load_arena
     if spec == "local_jsonl":
         return load_local_jsonl
+    if spec == "raid":
+        return load_raid
     if spec.startswith("hf:"):
         return lambda _cfg, scan_limit: load_generic(spec, _cfg, scan_limit)
     raise ValueError(f"unknown data source '{spec}'")
@@ -284,6 +331,95 @@ def _targets(total: int, mix: dict[str, float]) -> dict[str, int]:
     return {bucket: int(total * w / weight) for bucket, w in mix.items()}
 
 
+def _select_by_share(
+    pools: dict[str, list[Sample]], target: int, rng: random.Random, weights: dict[str, float]
+) -> list[Sample]:
+    names = [name for name in pools if pools[name]]
+    if not names:
+        return []
+    for name in names:
+        rng.shuffle(pools[name])
+    total_weight = sum(max(weights.get(name, 0.0), 0.0) for name in names)
+    if total_weight <= 0:
+        weights = {name: 1.0 for name in names}
+        total_weight = float(len(names))
+    quota = {
+        name: min(
+            len(pools[name]),
+            int(round(target * max(weights.get(name, 0.0), 0.0) / total_weight)),
+        )
+        for name in names
+    }
+    remaining = target - sum(quota.values())
+    guard = 0
+    while remaining > 0 and guard < 10:  # spare capacity fills the shortfall
+        guard += 1
+        spare = {
+            name: len(pools[name]) - quota[name] for name in names if len(pools[name]) > quota[name]
+        }
+        if not spare:
+            break
+        total_spare = sum(spare.values())
+        added = 0
+        for name, room in spare.items():
+            extra = min(room, max(1, int(round(remaining * room / total_spare))))
+            quota[name] += extra
+            added += extra
+        if not added:
+            break
+        remaining -= added
+    chosen = [sample for name in names for sample in pools[name][: quota[name]]]
+    rng.shuffle(chosen)
+    return chosen
+
+
+def _length_bin(length: int, edges: list[int]) -> int:
+    for i in range(len(edges) - 1):
+        if length < edges[i + 1]:
+            return i
+    return len(edges) - 2
+
+
+def _match_lengths(
+    chosen: dict[str, list[Sample]], edges: list[int], rng: random.Random
+) -> tuple[dict[str, list[Sample]], dict | None]:
+    """Give humans and AI the same length histogram so length cannot hint at the label."""
+    bins = len(edges) - 1
+    counts = {bucket: [0] * bins for bucket in BUCKETS}
+    for bucket, samples in chosen.items():
+        for sample in samples:
+            counts[bucket][_length_bin(len(sample.text), edges)] += 1
+    human = counts["human"]
+    ai = [
+        counts["ai_foundational"][i] + counts["ai_frontier"][i] for i in range(bins)
+    ]
+    human_total, ai_total = sum(human), sum(ai)
+    if not human_total or not ai_total:
+        return chosen, None
+    share = [min(human[i] / human_total, ai[i] / ai_total) for i in range(bins)]
+    total = sum(share)
+    if total <= 0:
+        return chosen, None
+    share = [value / total for value in share]
+    kept: dict[str, list[Sample]] = {}
+    for bucket, samples in chosen.items():
+        by_bin: list[list[Sample]] = [[] for _ in range(bins)]
+        for sample in samples:
+            by_bin[_length_bin(len(sample.text), edges)].append(sample)
+        out: list[Sample] = []
+        for i, pool in enumerate(by_bin):
+            rng.shuffle(pool)
+            out.extend(pool[: int(round(len(samples) * share[i]))])
+        rng.shuffle(out)
+        kept[bucket] = out
+    return kept, {
+        "edges": edges,
+        "share": [round(value, 4) for value in share],
+        "before": {bucket: len(samples) for bucket, samples in chosen.items()},
+        "after": {bucket: len(samples) for bucket, samples in kept.items()},
+    }
+
+
 def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
     if smoke:
         return build_smoke_bundle(cfg)
@@ -294,8 +430,11 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
 
     targets = _targets(dcfg.total_samples, dcfg.mix)
     caps = {bucket: int(n * 1.4) + 64 for bucket, n in targets.items()}
-    pools: dict[str, list[Sample]] = {b: [] for b in BUCKETS}
+    use_shares = bool(dcfg.source_shares)
+    source_pools: dict[str, dict[str, list[Sample]]] = {}
     ood_ai: list[Sample] = []
+    held_out_humans: list[Sample] = []
+    held_out_ai: list[Sample] = []
     seen: set[str] = set()
     manifest: dict = {
         "smoke": False,
@@ -304,12 +443,29 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
         "targets": targets,
         "sources": {},
         "errors": {},
-        "dropped": {"short": 0, "long": 0, "duplicate": 0, "bad_label": 0},
+        "dropped": {"short": 0, "long": 0, "duplicate": 0, "bad_label": 0, "held_out": 0},
         "held_out_generators": list(dcfg.held_out_generators),
+        "held_out_domains": list(dcfg.held_out_domains),
+        "source_shares": dcfg.source_shares,
     }
 
     for spec in dcfg.sources:
         loader = _make_loader(spec, cfg)
+        if use_shares and spec not in dcfg.source_shares:
+            LOG.warning(
+                "source '%s' has no data.source_shares entry; it only fills shortfalls",
+                spec,
+            )
+        shares = dcfg.source_shares.get(spec, {}) if use_shares else {}
+        per_source = {
+            bucket: (
+                int(targets[bucket] * shares.get(bucket, 0.0) * 1.5) + 64
+                if use_shares
+                else caps[bucket]
+            )
+            for bucket in BUCKETS
+        }
+        pools: dict[str, list[Sample]] = {bucket: [] for bucket in BUCKETS}
         loaded = 0
         LOG.info("scanning source '%s'", spec)
         try:
@@ -328,6 +484,14 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
                 if key in seen:
                     manifest["dropped"]["duplicate"] += 1
                     continue
+                if dcfg.held_out_domains and sample.domain in dcfg.held_out_domains:
+                    seen.add(key)
+                    manifest["dropped"]["held_out"] += 1
+                    if sample.label == 0 and len(held_out_humans) < dcfg.ood_cap * 2:
+                        held_out_humans.append(sample)
+                    elif sample.label == 1 and len(held_out_ai) < dcfg.ood_cap * 2:
+                        held_out_ai.append(sample)
+                    continue
                 seen.add(key)
 
                 if sample.label == 0:
@@ -343,34 +507,36 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
                         continue
 
                 pool = pools[sample.bucket]
-                if len(pool) < caps[sample.bucket]:
+                if len(pool) < per_source[sample.bucket]:
                     pool.append(sample)
                     loaded += 1
-                if all(len(pools[b]) >= caps[b] for b in BUCKETS):
+                if all(len(pools[b]) >= per_source[b] for b in BUCKETS):
                     break
         except Exception as exc:  # a flaky hub dataset must not kill the run
             LOG.warning("source '%s' failed: %r", spec, exc)
             manifest["errors"][spec] = repr(exc)
+        source_pools[spec] = pools
         manifest["sources"][spec] = loaded
         LOG.info(
             "source '%s': kept %d (pools %s)",
             spec,
             loaded,
-            {b: len(pool) for b, pool in pools.items()},
+            {bucket: len(pool) for bucket, pool in pools.items()},
         )
-        if all(len(pools[b]) >= caps[b] for b in BUCKETS):
-            break
 
-    if not pools["human"]:
+    available = {
+        bucket: sum(len(source_pools[spec][bucket]) for spec in dcfg.sources) for bucket in BUCKETS
+    }
+    if not available["human"]:
         raise RuntimeError(
-            "No human samples loaded. Add a human source (hc3/pile/local_jsonl) "
+            "No human samples loaded. Add a human source (hc3/mage/raid/local_jsonl) "
             "or provide data/local.jsonl."
         )
-    if not pools["ai_foundational"] and not pools["ai_frontier"]:
+    if not available["ai_foundational"] and not available["ai_frontier"]:
         raise RuntimeError(
             "No AI samples loaded. Add an AI source or provide data/local.jsonl."
         )
-    if not pools["ai_frontier"]:
+    if not available["ai_frontier"]:
         LOG.warning(
             "No ai_frontier samples loaded: modern-model robustness depends on this slice. "
             "Add prompt-paired frontier outputs via data/local.jsonl."
@@ -378,22 +544,45 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
 
     rng = random.Random(cfg.seed)
     chosen: dict[str, list[Sample]] = {}
-    humanized_reserve: list[Sample] = []
-    for bucket, target in targets.items():
-        pool = pools[bucket][:]
-        if not pool:
-            LOG.warning("bucket '%s' has no samples; effective mix is rebalanced", bucket)
-            chosen[bucket] = []
-            continue
-        rng.shuffle(pool)
-        if bucket != "human":
-            humanized = [s for s in pool if s.variant == "humanized"]
-            regular = [s for s in pool if s.variant != "humanized"]
-            keep = humanized[: int(target * dcfg.max_humanized_frac)]
-            humanized_reserve.extend(humanized[len(keep):])
-            pool = regular[: target - len(keep)] + keep
+    if use_shares:
+        for bucket, target in targets.items():
+            weights = {
+                spec: dcfg.source_shares.get(spec, {}).get(bucket, 0.0) for spec in dcfg.sources
+            }
+            pools = {spec: source_pools[spec][bucket][:] for spec in dcfg.sources}
+            chosen[bucket] = _select_by_share(pools, target, rng, weights)
+    else:
+        merged: dict[str, list[Sample]] = {bucket: [] for bucket in BUCKETS}
+        for spec in dcfg.sources:
+            for bucket in BUCKETS:
+                room = caps[bucket] - len(merged[bucket])
+                if room > 0:
+                    merged[bucket].extend(source_pools[spec][bucket][:room])
+        for bucket, target in targets.items():
+            pool = merged[bucket][:]
+            if not pool:
+                LOG.warning("bucket '%s' has no samples; effective mix is rebalanced", bucket)
+                chosen[bucket] = []
+                continue
             rng.shuffle(pool)
-        chosen[bucket] = pool[:target]
+            chosen[bucket] = pool[:target]
+
+    humanized_reserve: list[Sample] = []
+    for bucket in ("ai_foundational", "ai_frontier"):
+        pool = chosen.get(bucket) or []
+        if not pool:
+            continue
+        humanized = [s for s in pool if s.variant == "humanized"]
+        regular = [s for s in pool if s.variant != "humanized"]
+        keep = humanized[: int(targets[bucket] * dcfg.max_humanized_frac)]
+        humanized_reserve.extend(humanized[len(keep):])
+        chosen[bucket] = regular + keep
+        rng.shuffle(chosen[bucket])
+
+    if dcfg.length_match:
+        edges = list(dcfg.length_bins) + [dcfg.max_chars + 1]
+        chosen, length_info = _match_lengths(chosen, edges, rng)
+        manifest["length_match"] = length_info
 
     train: list[Sample] = []
     val: list[Sample] = []
@@ -425,11 +614,19 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
     rng.shuffle(humans_eval)
     humanized_humans = humans_eval[: len(humanized_ai)]
 
+    held_out_slice: list[Sample] = []
+    if held_out_ai and held_out_humans:
+        rng.shuffle(held_out_humans)
+        rng.shuffle(held_out_ai)
+        count = min(len(held_out_humans), len(held_out_ai), dcfg.ood_cap)
+        held_out_slice = held_out_ai[:count] + held_out_humans[:count]
+
     slices = {
         "val": val,
         "test_indomain": test,
         "test_ood_generators": ood_ai + ood_humans,
         "test_humanized": humanized_ai + humanized_humans,
+        "test_heldout_domain": held_out_slice,
     }
 
     manifest["splits"] = {
@@ -438,16 +635,23 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
         "test_indomain": len(test),
         "test_ood_generators": len(slices["test_ood_generators"]),
         "test_humanized": len(slices["test_humanized"]),
+        "test_heldout_domain": len(slices["test_heldout_domain"]),
     }
     manifest["train_buckets"] = {b: sum(1 for s in train if s.bucket == b) for b in BUCKETS}
+    train_sources: dict[str, int] = {}
+    for sample in train:
+        train_sources[sample.source] = train_sources.get(sample.source, 0) + 1
+    manifest["train_sources"] = train_sources
+    manifest["train_domains"] = _generator_counts(train, key="domain")
     manifest["train_generators"] = _generator_counts(train)
     return Bundle(train=train, val=val, slices=slices, manifest=manifest)
 
 
-def _generator_counts(samples: list[Sample], top: int = 25) -> dict[str, int]:
+def _generator_counts(samples: list[Sample], top: int = 25, key: str = "generator") -> dict[str, int]:
     counts: dict[str, int] = {}
     for sample in samples:
-        counts[sample.generator] = counts.get(sample.generator, 0) + 1
+        value = getattr(sample, key)
+        counts[value] = counts.get(value, 0) + 1
     ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top]
     return dict(ordered)
 

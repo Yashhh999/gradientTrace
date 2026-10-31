@@ -67,9 +67,14 @@ class DataCfg:
         ]
     )
     sources: list[str] = field(default_factory=lambda: ["hc3", "pile", "local_jsonl"])
+    source_shares: dict[str, dict[str, float]] = field(default_factory=dict)
     local_jsonl: str = "data/local.jsonl"
+    raid_jsonl: str = "data/raid_v2.jsonl"
     scan_limit_per_source: int = 400_000
     ood_cap: int = 8_000
+    length_match: bool = False
+    length_bins: list[int] = field(default_factory=lambda: [0, 500, 1000, 2000, 4000])
+    held_out_domains: list[str] = field(default_factory=list)
 
 
 @dataclass

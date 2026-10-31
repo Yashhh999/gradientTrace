@@ -1,0 +1,74 @@
+# gradientTrace v2 pilot - 50k samples, one epoch, gated by the external acceptance test
+# Run colab/external_gate.py against the pilot Hub repo before committing to the full v2 run.
+seed: 42
+backbone: microsoft/deberta-v3-large
+max_length: 512
+
+head:
+  dropout: 0.1
+  pooling: cls
+
+train:
+  output_dir: runs/gradientTrace-v2-pilot
+  epochs: 1
+  lr: 1.5e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.10
+  max_grad_norm: 1.0
+  per_device_batch_size: auto
+  grad_accum: auto
+  precision: auto
+  gradient_checkpointing: true
+  early_stopping_patience: 0
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  dataloader_workers: auto
+  log_every: 25
+  max_steps: -1
+
+data:
+  total_samples: 50000
+  min_chars: 200
+  max_chars: 12000
+  mix:
+    human: 0.40
+    ai_foundational: 0.40
+    ai_frontier: 0.20
+  val_frac: 0.10
+  test_frac: 0.10
+  max_humanized_frac: 0.25
+  held_out_generators: [llama-2, mistral, gemini]
+  frontier_patterns: [gpt-4, gpt-5, gpt4, o1, o3, claude, gemini, grok, llama-3, llama3, mistral-large, deepseek, qwen, command-r]
+  sources: [hc3, "hf:yaful/MAGE", arena, raid, local_jsonl]
+  source_shares:
+    hc3:
+      human: 0.25
+      ai_foundational: 0.10
+    "hf:yaful/MAGE":
+      human: 0.35
+      ai_foundational: 0.30
+    raid:
+      human: 0.40
+      ai_foundational: 0.45
+      ai_frontier: 0.80
+    arena:
+      ai_frontier: 0.40
+    local_jsonl: {}
+  local_jsonl: data/local.jsonl
+  raid_jsonl: data/raid_v2.jsonl
+  scan_limit_per_source: 400000
+  ood_cap: 8000
+  length_match: false
+  length_bins: [0, 500, 1000, 2000, 4000]
+  held_out_domains: [poetry]
+
+hub:
+  model_id: Yashhh999/gradientTrace-v2-pilot
+  push: false
+  private: true
+  checkpoint_strategy: checkpoint
+
+wandb:
+  enabled: false
+  project: gradienttrace

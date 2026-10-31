@@ -3,7 +3,9 @@
 # Notebook settings: Accelerator = GPU T4 x2, Internet = On.
 # Add-ons > Secrets: HF_TOKEN (write scope) for Hub checkpoints; WANDB_API_KEY optional.
 RUN = "smoke"                        # "smoke" (~10 min sanity) | "full" (real training)
-HUB_ID = "Yashhh999/gradientTrace"   # HF model repo to receive checkpoints
+CONFIG = "base"                      # base | v2 | pilot -> configs/<CONFIG>.yaml
+HUB_ID = ""                          # "" = per-CONFIG default (gradientTrace / -v2 / -v2-pilot)
+RAID_HUB = "Yashhh999/gradientTrace" # repo holding v2/raid_v2.jsonl from colab/build_raid.py
 PUSH_SMOKE = False                   # also push the smoke model to "<HUB_ID>-smoke"
 MAX_STEPS = 0                        # full run: stop after this many optimizer steps per session
                                      # (RESUME keeps counting from the checkpoint); 0 = all EPOCHS
@@ -73,6 +75,33 @@ else:  # keep runs/ so RESUME works within a session
 os.chdir(REPO_DIR)
 run(f"{sys.executable} -m pip -q install -r requirements.txt")
 
+assert CONFIG in ("base", "v2", "pilot"), f"unknown CONFIG '{CONFIG}'"
+DEFAULT_HUB = {
+    "base": "Yashhh999/gradientTrace",
+    "v2": "Yashhh999/gradientTrace-v2",
+    "pilot": "Yashhh999/gradientTrace-v2-pilot",
+}
+HUB_ID = HUB_ID or DEFAULT_HUB[CONFIG]
+
+if CONFIG in ("v2", "pilot"):  # paired RAID slice; build it once with colab/build_raid.py
+    from huggingface_hub import hf_hub_download
+
+    assert os.environ.get("HF_TOKEN"), "HF_TOKEN is required to download the private RAID slice."
+    os.makedirs(os.path.join(REPO_DIR, "data"), exist_ok=True)
+    try:
+        raid_src = hf_hub_download(
+            repo_id=RAID_HUB, filename="v2/raid_v2.jsonl", token=os.environ["HF_TOKEN"]
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"RAID slice missing: run colab/build_raid.py with HUB_ID={RAID_HUB} first ({exc!r})"
+        ) from exc
+    shutil.copy(raid_src, os.path.join(REPO_DIR, "data/raid_v2.jsonl"))
+    print(
+        f"[gradientTrace] raid slice <- {RAID_HUB}/v2/raid_v2.jsonl"
+        f" ({os.path.getsize(os.path.join(REPO_DIR, 'data/raid_v2.jsonl')) / 1e6:.1f} MB)"
+    )
+
 import torch  # safe here: only the TPU runtime cares about a kernel-side torch import
 
 assert torch.cuda.is_available(), "Set Settings > Accelerator > GPU T4 x2, then re-run this cell."
@@ -97,7 +126,7 @@ hub = HUB_ID if RUN == "full" else HUB_ID + "-smoke"
 cmd = [
     sys.executable, "-m", "torch.distributed.run", "--standalone",
     "--nproc_per_node", str(world), launcher,
-    "--config", "configs/base.yaml", "--hub-model-id", hub,
+    "--config", f"configs/{CONFIG}.yaml", "--hub-model-id", hub,
     "--batch-size", str(MICRO_BATCH), "--grad-accum", str(GRAD_ACCUM),
 ]
 if RUN == "smoke":

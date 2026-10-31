@@ -143,20 +143,27 @@ if CONFIG in ("v2", "pilot"):  # paired RAID slice; build it once with colab/bui
     raid_path = os.path.join(REPO_DIR, "data/raid_v2.jsonl")
     shutil.copy(raid_src, raid_path)
     rows = humans = 0
+    human_domains = collections.Counter()
     with open(raid_path, encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             rows += 1
-            humans += json.loads(line).get("label") == 0
-    if humans < 1000:  # the first slice kept almost no RAID humans; refuse to train on it
+            rec = json.loads(line)
+            if rec.get("label") == 0:
+                humans += 1
+                human_domains[rec.get("domain")] += 1
+    if humans < 10000 or len(human_domains) < 7:
+        # the first slice had 1,233 humans in 3 domains; v2 needs every domain populated
         raise RuntimeError(
-            f"RAID slice at {RAID_HUB}/v2/raid_v2.jsonl has {humans} human rows; rebuild it"
-            " with colab/build_raid.py before running v2/pilot."
+            f"RAID slice at {RAID_HUB}/v2/raid_v2.jsonl has {humans} human rows across"
+            f" {len(human_domains)} domains; rebuild it with colab/build_raid.py"
+            " before running v2/pilot."
         )
     print(
         f"[gradientTrace] raid slice <- {RAID_HUB}/v2/raid_v2.jsonl"
-        f" ({rows} rows, {humans} human, {os.path.getsize(raid_path) / 1e6:.1f} MB)"
+        f" ({rows} rows, {humans} human in {len(human_domains)} domains,"
+        f" {os.path.getsize(raid_path) / 1e6:.1f} MB)"
     )
 
 import torch  # safe here: only the TPU runtime cares about a kernel-side torch import

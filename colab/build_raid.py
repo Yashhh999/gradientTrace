@@ -21,9 +21,12 @@ AI_CAP = 6000           # per domain, attack == none
 MODEL_CAP = 900         # per domain per model, keeps one model from filling AI_CAP
 HUMANIZED_CAP = 1500    # per domain, paraphrase/synonym attacks on model text
 HUMANIZED_MODEL_CAP = 300
+HUMAN_ATTACK_CAP = 1500 # per domain per attack; RAID also perturbs human text (spelling,
+                        # whitespace, ...), so keep a mix instead of one attack filling the cap
+HUMAN_EXCLUDE_ATTACKS = {"paraphrase", "synonym"}  # rewritten humans would clash with humanised AI
 MIN_CHARS = 200
 MAX_CHARS = 12000
-REGENERATE = False      # True ignores the pushed file and rebuilds every domain
+REGENERATE = True       # the first slice kept only unperturbed humans; set False after this rebuild
 
 import csv
 import hashlib
@@ -124,6 +127,9 @@ def push(files, message):
 
 def restore():
     if REGENERATE:
+        for path in (COMBINED, META_PATH):
+            if path.is_file():
+                path.unlink()
         return
     try:
         path = hf_hub_download(repo_id=HUB_ID, filename="v2/raid_v2.jsonl", token=token)
@@ -179,9 +185,9 @@ def to_record(row, domain):
     model = row[3].strip().lower()
     attack = row[6].strip().lower()
     if model == "human":
-        if attack != "none":
+        if attack in HUMAN_EXCLUDE_ATTACKS:
             return None
-        label, variant = 0, "raw"
+        label, variant = 0, "raw"  # attacked human text is still human-labelled in RAID
     elif attack == "none":
         label, variant = 1, "raw"
     elif attack in ("paraphrase", "synonym"):
@@ -201,6 +207,7 @@ def to_record(row, domain):
         "prompt": prompt[:500],
         "domain": domain,
         "variant": variant,
+        "attack": attack,
         "group": group,
         "pair_id": group,
     }
@@ -209,7 +216,9 @@ def to_record(row, domain):
 def build_domain(domain, start_gb, end_gb):
     counts = {"human": 0, "ai": 0, "humanized": 0}
     models = Counter()
+    human_attacks = Counter()
     per_model = defaultdict(int)
+    per_attack = defaultdict(int)
     rows = 0
     stage(f"{domain}: reading {start_gb:.2f}-{end_gb:.2f} GB")
     for row in stream_domain(domain, start_gb, end_gb):
@@ -218,8 +227,10 @@ def build_domain(domain, start_gb, end_gb):
         if rec is None:
             continue
         if rec["label"] == 0:
-            if counts["human"] >= HUMAN_CAP:
+            if counts["human"] >= HUMAN_CAP or per_attack[rec["attack"]] >= HUMAN_ATTACK_CAP:
                 continue
+            per_attack[rec["attack"]] += 1
+            human_attacks[rec["attack"]] += 1
             counts["human"] += 1
         elif rec["variant"] == "humanized":
             if counts["humanized"] >= HUMANIZED_CAP:
@@ -250,6 +261,7 @@ def build_domain(domain, start_gb, end_gb):
     stage(
         f"{domain}: {rows} rows -> human {counts['human']}, ai {counts['ai']},"
         f" humanized {counts['humanized']}; models {dict(models.most_common(6))}"
+        f"; human attacks {dict(human_attacks.most_common(6))}"
     )
 
 
@@ -297,6 +309,7 @@ for domain, (start_gb, end_gb) in WINDOWS.items():
         "human": sum(1 for r in rows if r["label"] == 0),
         "ai": sum(1 for r in rows if r["label"] == 1 and r["variant"] == "raw"),
         "humanized": sum(1 for r in rows if r["variant"] == "humanized"),
+        "human_attacks": dict(Counter(r["attack"] for r in rows if r["label"] == 0)),
     }
     meta["completed"] = sorted(completed | {domain})
     meta["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

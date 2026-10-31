@@ -592,6 +592,20 @@ def build_datasets(cfg: Config, smoke: bool = False) -> Bundle:
             "No ai_frontier samples loaded: modern-model robustness depends on this slice. "
             "Add prompt-paired frontier outputs via data/local.jsonl."
         )
+    empty: list[str] = []
+    if "local_jsonl" in dcfg.sources:
+        empty = [
+            bucket
+            for bucket, weight in dcfg.source_shares.get("local_jsonl", {}).items()
+            if weight > 0 and not source_pools["local_jsonl"][bucket]
+        ]
+    if empty:
+        # v2/pilot require clean news; a silent skip here trains the old confounded mix instead.
+        raise RuntimeError(
+            "data/local.jsonl is required by source_shares but loaded no "
+            f"{'/'.join(empty)} rows (file missing or empty). Build it with "
+            "colab/build_news.py or set LOCAL_JSONL, then retrain with RESUME=False."
+        )
 
     rng = random.Random(cfg.seed)
     chosen: dict[str, list[Sample]] = {}

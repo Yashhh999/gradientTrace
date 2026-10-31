@@ -201,7 +201,7 @@ raises immediately from `_make_loader`, before that per-source try block.
 | mage | 0.35 | 0.30 | — |
 | raid | 0.40 | 0.45 | 0.80 |
 | arena | — | — | 0.40 |
-| local_jsonl | — | — | — |
+| local_jsonl | 0.25 | 0.25 | — |
 
 Behavior (`_select_by_share`):
 
@@ -211,6 +211,8 @@ Behavior (`_select_by_share`):
 - While loading, each source pool is capped at `int(target*share*1.5) + 64` to leave headroom.
 - A source with no `source_shares` entry only fills shortfalls (warning logged).
 - If no weights are usable, sources split the bucket evenly.
+- `local_jsonl` is required in v2/pilot: if a weighted bucket loads zero rows, the build raises
+  (missing `data/local.jsonl` would otherwise silently train the old confounded mix).
 
 Consequence: raising a weight does not force data into the bucket; it only changes the quota
 when that source has supply. Check `manifest["sources"]` and `manifest["train_sources"]`
@@ -459,7 +461,9 @@ and trimmed at a sentence boundary).
 - Wired in by `one_shot_kaggle.py`: for `v2`/`pilot` it downloads the pairs to
   `data/local.jsonl` and aborts if they are missing (unless `LOCAL_JSONL` is set).
   `configs/{v2,pilot}.yaml` give `local_jsonl` 0.25 of the human and AI-foundational buckets
-  (~4,000 clean humans at the pilot, 20% of the human bucket).
+  (~4,000 clean humans at the pilot, 20% of the human bucket). As a second line of defence,
+  `build_datasets` raises if a weighted `local_jsonl` bucket loaded zero rows, so a stale
+  notebook cell cannot silently train the old mix.
 - Cost: ~30–60 min on one T4 for 4,000 stories × 2 generators; the dataset is then frozen and
   reused by later runs. **A rebuilt news file is a data change: set `RESUME=False`.**
 
@@ -533,6 +537,7 @@ state, ~4.4–5 GB per push).
 | gate flags ~97% of humans as AI; pooled AUROC ~0.5-0.6 | a source's labels are inverted (MAGE ships 1 = human, 0 = machine) | use `mage`, not `hf:yaful/MAGE`; check every new source's label convention |
 | gate ~0.96 on reviews but ~0.48 on news, 97% of news humans flagged | training humans are perturbed in news/reddit/books/poetry, clean only in reviews/wiki/recipes; AI is clean everywhere | train on the paired clean-news set (`colab/build_news.py`); it is downloaded automatically into `data/local.jsonl` |
 | `paired clean news missing` when the training cell starts | `v2/news_pairs.jsonl` has not been built/pushed, or `NEWS_HUB` is wrong | run `colab/build_news.py` (it appends/pushes partials), or point `LOCAL_JSONL` at your own paired file |
+| `data/local.jsonl is required by source_shares but loaded no … rows` at data build | the pasted training cell is stale (skips the news download) or `LOCAL_JSONL` points nowhere | re-paste the current `one_shot_kaggle.py`; the build now aborts before training instead of silently using the old mix |
 | news builder ends with one generator | a model architecture is unsupported by the installed transformers | read the printed load error; the cell falls back through `GEN_MODELS`; one generator is still usable, two are better |
 
 ---
@@ -563,6 +568,12 @@ state, ~4.4–5 GB per push).
 - **Pilot history:** pre-fix pilot (2026-10-31) ran 607 steps in 4,637 s with val 0.9972.
   Fixed pilot (2026-11-01) ran the same 607 steps in ~80 min: val 0.9966/0.937, in-domain
   0.9966/0.933, OOD 0.9993/0.987, humanized 0.9993/0.984, held-out poetry 0.9732/0.577.
+- **Invalid news pilot (2026-11-01):** a pilot was trained and pushed to `-v2-pilot` before
+  `build_news.py` ran (`v2/news_pairs.jsonl` is 404 on the Hub). The new config was in effect
+  (`source_shares.local_jsonl` 0.25) but the pasted cell was stale and skipped the download,
+  so `manifest["sources"]["local_jsonl"]` is 0 and the mix is identical to the fixed pilot
+  (train 38,717 / val 5,208; internal val 0.9958). **Do not gate it**; it cannot test the news
+  fix. `build_datasets` now aborts on this state.
 - **Diagnosis (2026-11-01):** the RAID human side is perturbed in news, reddit, books and
   poetry and clean only in reviews/wiki/recipes, while AI rows are clean everywhere. The model
   learned domain-specific "perturbed = human, clean = AI". The gate's clean ag_news humans
@@ -587,11 +598,13 @@ state, ~4.4–5 GB per push).
   now unperturbed).
 - **Next steps, in order:**
   1. Run `colab/build_news.py` (fresh Kaggle GPU session, ~30–60 min for 4,000 stories × 2
-     generators). Check the printed counts and `v2/news_pairs_meta.json`; the file is frozen
-     and reused by every later run.
+     generators). It has not run yet (`v2/news_pairs.jsonl` is 404). Check the printed counts
+     and `v2/news_pairs_meta.json`; the file is frozen and reused by every later run.
   2. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) in a **fresh session**
-     (the builder's kernel can still hold GPU memory). Expect ~607 steps, ~80 min training plus
-     data build and final eval. Verify `manifest["train_sources"]` shows `local` with ~4k human
+     (the builder's kernel can still hold GPU memory) with the **current** `one_shot_kaggle.py`
+     re-pasted; a stale cell skips the news download. Expect `news pairs <- …` before training;
+     `build_datasets` now aborts if it is missing. ~607 steps, ~80 min training plus data build
+     and final eval. Verify `manifest["train_sources"]` shows the local source with ~4k human
      and ~4.5k AI rows, and that the human bucket still has hc3/mage/raid/local.
   3. Gate it (`MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`, `MODEL_LABEL="v2-pilot-news"`,
      `GATE_NAME="external_gate_v1"`, `REGENERATE=False`, `PUSH=True`). Success is the news

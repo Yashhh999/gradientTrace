@@ -22,6 +22,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -205,12 +206,15 @@ def load_frozen(path):
 
 
 def make_snippet(text, limit):
-    text = text.strip()
-    end = text.find(". ")
-    if 0 < end < limit:
-        return text[: end + 1]
-    cut = text[:limit].rsplit(" ", 1)[0]
-    return cut + ("..." if len(cut) < len(text) else "")
+    # The first "sentence" is often a dateline ("Ky.") or a one-liner ("Don't waste
+    # your time."); keep adding sentences until the topic is substantive.
+    parts = re.split(r"(?<=[.!?])\s+", text[:limit])
+    snippet = ""
+    for part in parts:
+        if snippet and len(snippet) >= 60:
+            break
+        snippet = (snippet + " " + part).strip()
+    return snippet
 
 
 def load_humans():

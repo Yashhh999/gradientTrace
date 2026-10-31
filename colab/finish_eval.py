@@ -1,9 +1,9 @@
-# gradientTrace - finish evaluation on a Colab T4 (paste this whole file into one cell)
-# Runtime > Change runtime type > T4 GPU. Secrets: HF_TOKEN (write scope).
-# Each slice is evaluated separately, saved to runs/gradientTrace/eval_partial.json and
-# pushed to the Hub, so a disconnect never costs more than the slice in flight.
+# gradientTrace - finish evaluation on a Colab T4 or Kaggle 2x T4 (paste this whole file into one cell)
+# Colab: Runtime > Change runtime type > T4 GPU. Kaggle: Accelerator > GPU T4 x2, Internet > On.
+# Secrets: HF_TOKEN (write scope). Each slice is evaluated separately, saved to
+# runs/gradientTrace/eval_partial.json and pushed to the Hub, so a disconnect never costs
+# more than the slice in flight.
 HUB_ID = "Yashhh999/gradientTrace"
-REPO_DIR = "/content/gradientTrace"
 BATCH_SIZE = 32          # fp16 eval; an OOM halves it automatically
 PUSH = True              # upload eval_report.json, data_manifest.json, README.md
 RESUME_PARTIAL = True    # skip slices already present in eval_partial.json
@@ -12,29 +12,49 @@ import importlib.util
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import time
 
 T0 = time.time()
+REPO_DIR = "/kaggle/working/gradientTrace" if os.path.isdir("/kaggle/working") else "/content/gradientTrace"
 
 
 def stage(message):
     print(f"\n[finish +{time.time() - T0:5.0f}s] {message}", flush=True)
 
 
-try:  # secret -> env; never fall back to getpass, which blocks the cell forever
-    from google.colab import userdata
+token = os.environ.get("HF_TOKEN") or ""
+if not token and os.path.isdir("/kaggle/working"):  # never getpass: it blocks the cell
+    try:
+        from kaggle_secrets import UserSecretsClient
 
-    os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN") or ""
-except Exception as exc:
-    print("[finish] Colab secret unavailable:", exc, flush=True)
-if not os.environ.get("HF_TOKEN"):
+        token = UserSecretsClient().get_secret("HF_TOKEN") or ""
+    except Exception as exc:
+        print("[finish] Kaggle secret unavailable:", exc, flush=True)
+if not token:
+    try:
+        from google.colab import userdata
+
+        token = userdata.get("HF_TOKEN") or ""
+    except Exception:
+        pass
+if not token:
     raise SystemExit(
-        "[finish] HF_TOKEN missing. Click the key icon in the left sidebar, add a secret named "
-        "HF_TOKEN (write scope), enable notebook access, then re-run this cell."
+        "[finish] HF_TOKEN missing. Kaggle: Add-ons > Secrets, add HF_TOKEN (write scope) and "
+        "enable it for this notebook; Colab: key icon in the left sidebar. Then re-run."
     )
+os.environ["HF_TOKEN"] = token
 print("[finish] HF_TOKEN present (value not printed)", flush=True)
+
+try:  # Kaggle silently blocks clone/HF downloads when Internet is off
+    socket.create_connection(("huggingface.co", 443), timeout=10).close()
+except OSError as exc:
+    raise SystemExit(
+        "[finish] no internet: Kaggle Settings > Internet > On (or Colab network is down), "
+        "then re-run this cell."
+    ) from exc
 
 if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
     stage(f"cloning into {REPO_DIR}")
@@ -78,7 +98,10 @@ else:
 import torch  # noqa: E402  (only after the dependency check)
 
 if not torch.cuda.is_available():
-    raise SystemExit("[finish] no GPU: Runtime > Change runtime type > T4 GPU, then re-run")
+    raise SystemExit(
+        "[finish] no GPU: Kaggle Settings > Accelerator > GPU T4 x2, or Colab "
+        "Runtime > Change runtime type > T4 GPU, then re-run"
+    )
 import transformers  # noqa: E402
 
 print(
@@ -131,7 +154,7 @@ if PUSH:
 
 report = {}
 if PUSH and RESUME_PARTIAL and not partial_path.is_file():
-    try:  # a new Colab VM starts empty; the previous session's slices are on the Hub
+    try:  # a fresh VM starts empty; the previous session's slices are on the Hub
         from huggingface_hub import hf_hub_download
 
         fetched = hf_hub_download(

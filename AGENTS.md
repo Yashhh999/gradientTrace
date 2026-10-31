@@ -396,10 +396,11 @@ for the requested domain, and pushes `v2/raid_v2.jsonl` + `v2/raid_v2_meta.json`
 - Byte windows were probed: books 1.75, news 3.30, poetry 5.05, recipes 6.20, reddit 7.85,
   reviews 9.04, wiki 9.93 GB. Earlier windows silently read the wrong domains.
 
-Current slice (2026-10-31): 73,500 rows = 21,000 human (3,000 × 7 domains), 42,000 raw AI,
-10,500 humanized; built in 154s. Human p50 885–1,922 chars; AI p50 892–1,962. Clean (`attack:
-none`) humans exist only in reviews (650), wiki (293), recipes (290); all other human rows are
-perturbed — a known caveat when interpreting style cues.
+Current slice (checked on the Hub 2026-10-31): 71,297 rows, 18,848 human rows across 7 domains;
+133.2 MB. The 73,500 / 21,000 figures printed during the build are caps, not actual rows. Human
+p50 885–1,922 chars; AI p50 892–1,962. Clean (`attack: none`) humans exist only in reviews
+(650), wiki (293), recipes (290); all other human rows are perturbed — a known caveat when
+interpreting style cues.
 
 ---
 
@@ -478,31 +479,30 @@ state, ~4.4–5 GB per push).
   (95% above 0.9) and Yelp at 0.9950 (99.5% above 0.9). **Not shippable.**
 - **External gate v1:** pooled AUROC 0.5270, TPR@1% FPR 0.0000, FPR@0.5 0.9750 (§7.5 table).
   This is the honest baseline for v2.
-- **v2 data:** RAID slice rebuilt and healthy (73,500 rows; 21k humans; poetry held out).
+- **v2 data:** RAID slice rebuilt and healthy (71,297 rows; 18,848 humans in 7 domains; poetry
+  held out).
   `configs/v2.yaml` and `configs/pilot.yaml` use hc3 + MAGE + arena + RAID, source quotas,
   grouped splits, humanized cap, held-out poetry.
-- **Pilot:** the 50k / 1-epoch pilot has not yet completed a training run. The first attempt
-  died with its traceback lost. The second attempt (logged 2026-10-31) built data cleanly and
-  then hit a CUDA OOM at the first `optimizer.step()`: GPU 0 held the notebook kernel's
-  6.58 GiB (PID 49, an in-kernel gate/eval model from an earlier cell) plus rank 0's 7.97 GiB,
-  i.e. 14.55 of 14.56 GiB, so the 16 MiB Adam state allocation failed. This is not a data,
-  token, or Hub problem. The cell now preflights the Hub, reprints the child traceback,
-  refuses a stale RAID slice, and aborts if GPU 0 has <13 GiB free; the gate and finish-eval
-  scripts free their model at exit.
+- **Pilot (2026-10-31):** completed. 607 steps (1 epoch at global 64), 4,637 s of training,
+  fp16 on 2×T4; val AUROC 0.9957 at step 300 and 0.9972 at step 600 (TPR@1% 0.9498). Best
+  model + `eval_report.json` + `data_manifest.json` + README pushed to
+  `Yashhh999/gradientTrace-v2-pilot`. Final slice eval: val 5,089 → 0.9972/0.950;
+  test_indomain 4,564 → 0.9946/0.913; test_ood_generators 11,900 → 0.9986/0.982;
+  test_humanized 756 → 0.9960/0.955; test_heldout_domain 5,060 → **0.7512/0.172**. The
+  held-out domain (poetry) is the weak spot; internal numbers are still not detection quality.
 - **Pilot data build (same log):** train 38,792 / val 5,089; slices 4,564 in-domain, 11,900
   OOD, 756 humanized, 5,060 held-out domain. Buckets 16,100 human / 15,989 foundational /
   6,703 frontier — about 8.4k of the 10k frontier target (arena's per-source cap of 6,064 plus
   RAID's 2,381 frontier rows). At 150k the 30k frontier target can only reach ~20.4k from the
   same sources; raise arena's frontier share or rebuild RAID with higher caps after the gate.
 - **Next steps, in order:**
-  1. Restart the Kaggle session (to free the kernel's GPU memory), then rerun the pilot
-     (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`; expect ~607 steps, checkpoints at 300
-     and 600, ~80–90 min training plus data build and final eval). Nothing to resume — the
-     crash was at step 0.
-  2. Gate the pilot with the frozen dataset: `MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`,
+  1. Gate the pilot with the frozen dataset: `MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`,
      `MODEL_LABEL="v2-pilot"`, `GATE_NAME="external_gate_v1"`, `REGENERATE=False`, `PUSH=True`.
-  3. Compare pooled TPR@1% FPR / AUROC against the v1 baseline before committing to the full
-     150k v2 run (`Yashhh999/gradientTrace-v2`, ~12h on 2×T4, ~30h on v5e-1).
+  2. Compare pooled TPR@1% FPR / AUROC against the v1 baseline (0.0000 / 0.5270). A TPR still
+     at 0 means the data change did not help; a clear move means proceed. Fix the frontier
+     supply before the full run.
+  3. If the gate passes, run the full 150k v2 recipe (`Yashhh999/gradientTrace-v2`, ~12h on
+     2×T4, ~30h on v5e-1) and gate that model the same way.
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---

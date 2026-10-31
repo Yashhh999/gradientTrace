@@ -12,8 +12,7 @@ N_STORIES = 4000              # human leads; each is paired with one text per ge
 TARGET_GENERATORS = 2
 GEN_MODELS = [
     "microsoft/Phi-3-mini-4k-instruct",
-    "ibm-granite/granite-3.0-2b-instruct",
-    "HuggingFaceTB/SmolLM2-1.7B-Instruct",  # fallback if a newer architecture is unsupported
+    "HuggingFaceTB/SmolLM2-1.7B-Instruct",  # Granite-2B produced NaN logits in fp16 on T4
 ]
 GEN_BATCH = 8
 TEMPERATURE = 0.8
@@ -165,18 +164,35 @@ def cut_to_sentence(text, limit):
     return window[: ends[-1]].strip()
 
 
+REJECTS = Counter()
+REJECT_EXAMPLES = {}
+
+
+def reject(reason, text):
+    REJECTS[reason] += 1
+    samples = REJECT_EXAMPLES.setdefault(reason, [])
+    if len(samples) < 2 and text:
+        samples.append(norm(text)[:240])
+    return None
+
+
 def clean_output(text, human, ended):
     text = norm(text)
     if not text:
-        return None
+        return reject("empty", "")
     low = text.lower()
-    if low.startswith(_BAD_STARTS) or any(phrase in low[:200] for phrase in _BAD_MENTIONS):
-        return None
+    if low.startswith(_BAD_STARTS):
+        return reject("refusal", text)
+    if any(phrase in low[:200] for phrase in _BAD_MENTIONS):
+        return reject("preamble", text)
     limit = int(len(human) * 1.6)
+    cutoff = text
     if not ended or len(text) > limit:
         text = cut_to_sentence(text, limit)
-    if not text or len(text) < MIN_AI_CHARS:
-        return None
+    if not text:
+        return reject("no_sentence", cutoff)
+    if len(text) < MIN_AI_CHARS:
+        return reject("short", text)
     return text
 
 
@@ -323,6 +339,7 @@ def generate_model(model_id, pending, stories, fh, index):
     torch.manual_seed(1000 + index)
     written = 0
     last_push = 0
+    examples_shown = False
     model_t0 = time.time()
     try:
         for start in range(0, len(pending), GEN_BATCH):
@@ -344,6 +361,9 @@ def generate_model(model_id, pending, stories, fh, index):
                 out = model.generate(
                     **enc,
                     max_new_tokens=max_new,
+                    # Phi-3 often ends after ~25 words; force roughly the human's length so the
+                    # 200-char filter does not discard most of the corpus.
+                    min_new_tokens=min(max_new, max(48, target_tokens)),
                     do_sample=True,
                     temperature=TEMPERATURE,
                     top_p=TOP_P,
@@ -386,6 +406,11 @@ def generate_model(model_id, pending, stories, fh, index):
                     f" {written} texts kept, {rate:.2f}s/text | {time.time() - T0:.0f}s",
                     flush=True,
                 )
+                print(f"[news] rejects: {dict(REJECTS)}", flush=True)
+            if done >= 80 and not examples_shown:
+                examples_shown = True
+                for reason, samples in REJECT_EXAMPLES.items():
+                    print(f"[news] reject example [{reason}]: {samples[0]!r}", flush=True)
             if written - last_push >= PUSH_EVERY:
                 last_push = written
                 try:  # a disconnected VM loses its disk; ship the partials
@@ -394,11 +419,19 @@ def generate_model(model_id, pending, stories, fh, index):
                 except Exception as exc:
                     print("[news] partial push failed (generation continues):", repr(exc), flush=True)
     finally:
+        try:  # a later model can crash the CUDA context; never lose texts already generated
+            fh.flush()
+            push([(OUT, "v2/news_pairs.jsonl")], f"gradientTrace news pairs: {written} new AI texts")
+        except Exception as exc:
+            print("[news] final push failed:", repr(exc), flush=True)
         del model
         import gc
 
         gc.collect()
-        torch.cuda.empty_cache()
+        try:
+            torch.cuda.empty_cache()
+        except Exception as exc:  # a poisoned context raises here; keep the original traceback
+            print("[news] cuda cleanup skipped:", repr(exc), flush=True)
     stage(f"{model_id}: wrote {written}/{len(pending)} AI texts")
     return True
 

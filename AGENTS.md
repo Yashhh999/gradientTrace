@@ -448,9 +448,14 @@ and trimmed at a sentence boundary).
 - Humans: `nschantz21/cnn_dailymail-parsed` (parquet copy of CNN/DailyMail 3.0.0), train split,
   `article` field; first sentences until 200 chars, max 520. A lead that does not end on a
   sentence boundary is skipped.
-- Generators: `microsoft/Phi-3-mini-4k-instruct` and `ibm-granite/granite-3.0-2b-instruct`
-  (SmolLM2-1.7B is the fallback when an architecture is unsupported). Never Qwen — it is the
-  gate's generator.
+- Generators: `microsoft/Phi-3-mini-4k-instruct` and `HuggingFaceTB/SmolLM2-1.7B-Instruct`.
+  Granite-2B was dropped: its fp16 logits went NaN on the T4 (`probability tensor contains
+  either inf, nan or element < 0`). Never Qwen — it is the gate's generator.
+- Generation forces `min_new_tokens ≈ the human's token count` because Phi-3-mini often stops
+  after ~25 words, which put most outputs under the 200-char loader minimum (first pass kept
+  only 14%). Every progress line prints `[news] rejects: {...}` with the drop reasons and a
+  couple of examples, so a low yield is diagnosable instead of silent. A model's rows are
+  pushed when it finishes, even if the next model crashes the CUDA context.
 - Output: 4,000 human leads + up to 8,000 AI texts as `v2/news_pairs.jsonl`, plus
   `v2/news_pairs_meta.json` (counts, per-generator lengths, prompt template). Rows use the
   `local.jsonl` schema: label 0/1, `domain: news`, `bucket: ai_foundational` (human rows are
@@ -464,7 +469,7 @@ and trimmed at a sentence boundary).
   (~4,000 clean humans at the pilot, 20% of the human bucket). As a second line of defence,
   `build_datasets` raises if a weighted `local_jsonl` bucket loaded zero rows, so a stale
   notebook cell cannot silently train the old mix.
-- Cost: ~30–60 min on one T4 for 4,000 stories × 2 generators; the dataset is then frozen and
+- Cost: ~30–60 min per generator on one T4 for 4,000 stories; the dataset is then frozen and
   reused by later runs. **A rebuilt news file is a data change: set `RESUME=False`.**
 
 ---
@@ -539,6 +544,8 @@ state, ~4.4–5 GB per push).
 | `paired clean news missing` when the training cell starts | `v2/news_pairs.jsonl` has not been built/pushed, or `NEWS_HUB` is wrong | run `colab/build_news.py` (it appends/pushes partials), or point `LOCAL_JSONL` at your own paired file |
 | `data/local.jsonl is required by source_shares but loaded no … rows` at data build | the pasted training cell is stale (skips the news download) or `LOCAL_JSONL` points nowhere | re-paste the current `one_shot_kaggle.py`; the build now aborts before training instead of silently using the old mix |
 | news builder ends with one generator | a model architecture is unsupported by the installed transformers | read the printed load error; the cell falls back through `GEN_MODELS`; one generator is still usable, two are better |
+| news builder crashes with `probability tensor contains either inf, nan or element < 0` | a generator is numerically unstable in fp16 on the T4 (Granite-2B) | use SmolLM2 (current list); do not add fp16-unstable models |
+| news builder keeps only ~14% of generations | completions end below the 200-char loader minimum | read `[news] rejects:`; `min_new_tokens` now forces roughly the human length; if `preamble` dominates, strip the lead-in |
 
 ---
 
@@ -591,15 +598,20 @@ state, ~4.4–5 GB per push).
   probe stopped. The extractor's caps were not why the slice looked clean-less; RAID train
   simply has no clean human news to give.
 - **Clean-news builder (2026-11-01):** `colab/build_news.py` pairs 4,000 CNN/DailyMail leads
-  with AI news from Phi-3-mini and Granite-2B using the gate's own prompt, and pushes
-  `v2/news_pairs.jsonl`. `one_shot_kaggle.py` downloads it into `data/local.jsonl` and refuses
-  to train without it; `configs/{v2,pilot}.yaml` give it 0.25 of the human and AI-foundational
-  buckets (~4,000 clean news humans = 20% of the pilot human bucket, so ~68% of that bucket is
-  now unperturbed).
+  with AI news from Phi-3-mini and SmolLM2 using the gate's own prompt, and pushes
+  `v2/news_pairs.jsonl`. The first pass pushed the 4,000 human leads but only 402 Phi-3 texts
+  (14% kept; most completions ended below 200 chars) before Granite-2B crashed with NaN logits
+  in fp16; it is resumable and tops up the missing stories. The cell now forces
+  `min_new_tokens≈human tokens`, prints rejection reasons, pushes after each model, and uses
+  SmolLM2 instead of Granite. `one_shot_kaggle.py` downloads the pairs into `data/local.jsonl`
+  and refuses to train without them; `configs/{v2,pilot}.yaml` give it 0.25 of the human and
+  AI-foundational buckets (~4,000 clean news humans = 20% of the pilot human bucket, so ~68% of
+  that bucket is now unperturbed).
 - **Next steps, in order:**
-  1. Run `colab/build_news.py` (fresh Kaggle GPU session, ~30–60 min for 4,000 stories × 2
-     generators). It has not run yet (`v2/news_pairs.jsonl` is 404). Check the printed counts
-     and `v2/news_pairs_meta.json`; the file is frozen and reused by every later run.
+  1. Rerun `colab/build_news.py` (fresh Kaggle GPU session, ~1 h). It is resumable: the Hub
+     already holds 4,000 human leads and 402 Phi-3 texts, and the rerun tops up the rest with
+     Phi-3 + SmolLM2. Check the `[news] rejects:` counters and `v2/news_pairs_meta.json`; the
+     file is frozen and reused by every later run.
   2. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) in a **fresh session**
      (the builder's kernel can still hold GPU memory) with the **current** `one_shot_kaggle.py`
      re-pasted; a stale cell skips the news download. Expect `news pairs <- …` before training;

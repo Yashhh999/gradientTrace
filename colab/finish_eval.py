@@ -130,6 +130,17 @@ if PUSH:
     api = HfApi(token=os.environ["HF_TOKEN"])
 
 report = {}
+if PUSH and RESUME_PARTIAL and not partial_path.is_file():
+    try:  # a new Colab VM starts empty; the previous session's slices are on the Hub
+        from huggingface_hub import hf_hub_download
+
+        fetched = hf_hub_download(
+            HUB_ID, "eval_partial.json", repo_id=HUB_ID, token=os.environ["HF_TOKEN"]
+        )
+        partial_path.write_text(Path(fetched).read_text(encoding="utf-8"), encoding="utf-8")
+        print("[finish] restored eval_partial.json from the Hub", flush=True)
+    except Exception as exc:
+        print("[finish] no Hub partial to restore:", repr(exc), flush=True)
 if RESUME_PARTIAL and partial_path.is_file():
     report = json.loads(partial_path.read_text(encoding="utf-8")).get("metrics", {})
     print("[finish] partial report found; done:", sorted(report), flush=True)

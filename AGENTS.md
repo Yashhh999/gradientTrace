@@ -19,11 +19,12 @@ real runs, and the current state of the work. Update this file when behavior cha
   A probe showed it flags ordinary human news/reviews as AI ~95–99% of the time.
   The only acceptance signal is the external gate (`colab/external_gate.py`).
 - **Current phase (2026-11-02):** the clean-news corpus moved the gate from chance to real news
-  separation, and the long-human/short-AI mix is the best yet: news AUROC 0.9323, TPR@1% FPR
-  0.6175, but news human mean 0.4273 and FPR@0.5 0.4225 — still above the 0.40 / 0.36 bar. The
-  residual human score sits in the 0–400-char bucket, so the short human rows were only part of
-  the cause; the next test raises the local long-human weight to 1.0 against the same corpus.
-  No full 150k run until news FPR@0.5 is at/below ~0.36 without giving up TPR@1% FPR >= 0.5.
+  separation. The best news model is the long-human/short-AI mix at local human 0.5: news AUROC
+  0.9323, TPR@1% FPR 0.6175, but human mean 0.4273 and FPR@0.5 0.4225 — above the 0.40 / 0.36
+  bar. Raising local human to 1.0 (longhuman2) regressed news (TPR@1% 0.4825, FPR@0.5 0.5325)
+  while lifting reviews, so the next test reverts human to 0.5 and cuts local AI 0.4 -> 0.25 to
+  weaken the journalist-prompt/short-AI contrast. No full 150k until news FPR@0.5 <=~0.36 with
+  TPR@1% >= 0.5.
 
 ---
 
@@ -201,7 +202,7 @@ raises immediately from `_make_loader`, before that per-source try block.
 | mage | 0.35 | 0.30 | — |
 | raid | 0.40 | 0.45 | 0.80 |
 | arena | — | — | 0.40 |
-| local_jsonl | 1.00 | 0.40 | — |
+| local_jsonl | 0.50 | 0.25 | — |
 
 Behavior (`_select_by_share`):
 
@@ -288,7 +289,7 @@ All configs share the model/schedule; only data and Hub targets differ.
 |---|---|---|---|
 | samples / epochs | 150k / 3 | 150k / 3 | 50k / 1 |
 | sources | hc3, pile, mage, arena, local_jsonl | hc3, mage, arena, raid, local_jsonl | same as v2 |
-| shares | none | per 5.3 (local human 1.00, AI 0.40) | per 5.3 (local human 1.00, AI 0.40) |
+| shares | none | per 5.3 (local human 0.50, AI 0.25) | per 5.3 (local human 0.50, AI 0.25) |
 | min chars | 200 | 100 | 100 |
 | RAID | no | `data/raid_v2.jsonl` | same |
 | news pairs | — | `data/local.jsonl` from `build_news.py` | same |
@@ -478,6 +479,19 @@ FPR@0.5 is 0.06 above the 0.36 bar. Removing the short human rows recovered only
 "short = AI". Reviews lost the short-clean-human calibration (TPR@1% 0.4950/0.5200 -> 0.3125),
 the cost of an all-long local human mix.
 
+Longhuman2 pilot (`external_gate_v1_report_v2-pilot-longhuman2.json`, 2026-11-02): raising
+`local_jsonl.human` to 1.0 (local human quota 10,000, ~8k train) refuted the "more clean humans"
+hypothesis and regressed the news bar. Gate: news 0.9299 / 0.4825 / 0.5325 (human mean 0.4273 ->
+0.5431, p50 0.2526 -> 0.6039, p90 0.9957, p99 0.9987; AI mean 0.9406 -> 0.9699; 1% threshold
+0.9987), reviews 0.9697 / 0.5450 / 0.1700 (human mean 0.1949, AI 0.9377 — a large gain, but Yelp
+is seen via RAID), pooled 0.9278 / 0.4412 / 0.3513 (pair 0.9725, matched 0.8780). AUROC is flat
+while both means rose, so this is a calibration shift: the larger local news-AI contrast
+sharpened AI scores (0.94 -> 0.97) and spilled onto clean ag_news humans; the news human
+distribution moved up as a whole (0–400 0.432 -> 0.546, 400–800 0.310 -> 0.495), not just at
+short lengths. Internal val 0.9964 / 0.927, OOD 0.9991, humanized 0.9999, poetry 0.9532 / 0.503.
+The 0.5 human mix remains the best news model; the residual is the strength of the local
+journalist-prompt/short-AI contrast, not a shortage of clean humans.
+
 Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp, so the
 reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
 human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
@@ -525,10 +539,10 @@ and trimmed at a sentence boundary).
 - Extra humans (human-only, no generation): `vblagoje/cc_news` (`plain_text` config, train
   split) `title` + `description`, one sentence of body appended if the pair is still under 200
   chars, cut on a sentence boundary at 520. This is the gate's ag_news form — a headline plus a
-  wire description — from many outlets, and it is why `local_jsonl.human` is 1.0 (0.5 until
-  2026-11-02). Rejected:
-  titles over 520 chars, texts with no sentence-ending punctuation, and duplicates of anything
-  already in the file (dedup by normalized lowercase text).
+  wire description — from many outlets, and it is why `local_jsonl.human` is 0.5 (1.0 on
+  2026-11-02 regressed news calibration: TPR@1% 0.6175 -> 0.4825, FPR@0.5 0.4225 -> 0.5325).
+  Rejected: titles over 520 chars, texts with no sentence-ending punctuation, and duplicates
+  of anything already in the file (dedup by normalized lowercase text).
 - Short AI variants close the length/form gap that made the cc_news pilot's AI side fail. The
   gate's Qwen news is 1.3 sentences (p5/p50/p95 = 78/134/223 chars) while every training AI row
   was 220+ chars (p50 331, 3.8 sentences) — zero overlap, so short clean text read as human.
@@ -561,9 +575,9 @@ and trimmed at a sentence boundary).
 - Wired in by `one_shot_kaggle.py`: for `v2`/`pilot` it downloads the pairs to
   `data/local.jsonl` and aborts if they are missing (unless `LOCAL_JSONL` is set). Its guard is
   1,000 human and 1,000 AI rows, so the file must contain the AI side too — cc_news alone is not
-  enough. `configs/{v2,pilot}.yaml` give `local_jsonl` 1.00 of the human bucket and 0.40 of
-  AI-foundational (a 10,000-row human quota at the pilot, ~8k train from the corpus cap) with
-  `min_chars: 100` so the short variants survive the loader. As a second line of defence, `build_datasets` raises if a weighted
+  enough. `configs/{v2,pilot}.yaml` give `local_jsonl` 0.50 of the human bucket and 0.25 of
+  AI-foundational (a 6,667-row human quota at the pilot, ~5.3k train) with `min_chars: 100` so
+  the short variants survive the loader. As a second line of defence, `build_datasets` raises if a weighted
   `local_jsonl` bucket loaded zero rows, so a stale notebook cell cannot silently train the
   old mix.
 - Cost: ~30–60 min per generator on one T4 for 4,000 stories (the cc_news stage is ~10–20 min
@@ -779,17 +793,24 @@ state, ~4.4–5 GB per push).
   reviews 0.9151 / 0.3125 / 0.2275 (human mean 0.2425), pooled 0.9088 / 0.4412 / 0.3250 (pair
   0.9525, matched 0.8786). TPR@1% clears 0.5 for the first time, but FPR@0.5 is still 0.06
   above the bar and the human residual is in 0–400 chars (0.4323 vs 0.3103 at 400–800).
-- **Next step (implemented 2026-11-02, not yet run):** raise `local_jsonl.human` 0.5 -> 1.0 in
-  `configs/{v2,pilot}.yaml` against the same frozen corpus (no builder rerun). Human weights
-  become hc3 0.25 / mage 0.35 / raid 0.40 / local 1.0, so the pilot's local quota is 10,000
-  (~8,000 train, the file cap) and hc3/mage/raid fall ~25%; the AI side stays local 0.4.
-  Fresh pilot (`RESUME=False`), gate as `v2-pilot-longhuman2`.
+- **Longhuman2 gate (2026-11-02):** raising the local human weight to 1.0 was a regression.
+  Gate (`external_gate_v1_report_v2-pilot-longhuman2.json`, model `-v2-pilot`): news 0.9299 /
+  0.4825 / 0.5325 (human mean 0.5431, p50 0.6039, p90 0.9957; AI mean 0.9699; threshold 0.9987),
+  reviews 0.9697 / 0.5450 / 0.1700 (human mean 0.1949, AI 0.9377), pooled 0.9278 / 0.4412 /
+  0.3513. AUROC stayed flat while both means rose: the larger local news-AI contrast sharpened
+  AI scores and spilled onto clean humans, and the news human distribution shifted up in both
+  length buckets (0–400 0.432 -> 0.546, 400–800 0.310 -> 0.495). The 0.5 human mix remains the
+  best news model.
+- **Next step (implemented 2026-11-02, not yet run):** revert `local_jsonl.human` 1.0 -> 0.5 and
+  cut `local_jsonl.ai_foundational` 0.4 -> 0.25 in `configs/{v2,pilot}.yaml`. Local AI quota
+  6,400 -> ~4,545 (~3.6k train), short-AI exposure -30%, and the freed weight goes to
+  raid/mage/hc3. No builder rerun. Fresh pilot (`RESUME=False`), gate as `v2-pilot-ailow`.
 - **Success bar:** news human mean <=~0.40, FPR@0.5 <=0.36, TPR@1% FPR >=0.5, AI mean >=0.9.
-  If the human mean stays ~0.42 with ~8k long humans, short AI is the residual cue and the next
-  lever is local AI weight (0.4 -> 0.25) or a length-balanced AI sample, not more humans. Watch
-  reviews TPR@1% (do not let it fall below ~0.40). If it clears, the 150k can be considered
+  If cutting local AI to 0.25 buys FPR@0.5 but drops TPR@1% below 0.5, the next step is 0.3 or
+  capping short variants at one per story. Watch reviews TPR@1% (do not let it fall below ~0.40).
+  If it clears, the 150k can be considered
   after fixing frontier supply (~20.4k of 30k) and growing the long cc human supply (the 150k
-  local quota needs ~16k train rows; the current corpus yields ~8k).
+  local human quota needs ~15k rows; the corpus has 10k, ~9k train).
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---

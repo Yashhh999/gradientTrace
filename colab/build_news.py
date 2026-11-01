@@ -3,12 +3,19 @@
 # v2's RAID news/reddit/books/poetry humans are 100% perturbed while its AI rows are clean, so
 # the model learned "clean prose = AI" and flagged clean human news at the gate (news AUROC
 # 0.4775). This cell adds the missing contrast: clean human news leads paired with AI news on
-# the same story, written with the external gate's own journalist prompt. Output:
-# v2/news_pairs.jsonl on the Hub, restored by colab/one_shot_kaggle.py into data/local.jsonl.
+# the same story, written with the external gate's own journalist prompt, plus human-only wire
+# stories from vblagoje/cc_news (title + description, the gate's headline+body form). CNN leads
+# alone did not transfer: the gate still scored clean ag_news humans at mean P(AI) 0.918.
+# Output: v2/news_pairs.jsonl on the Hub, restored by colab/one_shot_kaggle.py into
+# data/local.jsonl.
 HUB_ID = "Yashhh999/gradientTrace"
 DATASET = "nschantz21/cnn_dailymail-parsed"  # parquet copy of CNN/DailyMail 3.0.0
 SPLIT = "train"
 N_STORIES = 4000              # human leads; each is paired with one text per generator
+EXTRA_HUMAN_DATASET = "vblagoje/cc_news"  # title + description wire stories, many outlets
+EXTRA_HUMAN_CONFIG = "plain_text"
+EXTRA_HUMAN_SPLIT = "train"
+N_EXTRA_HUMANS = 6000         # human-only rows; the 4,000 CNN leads cover only 20% of the bucket
 TARGET_GENERATORS = 2
 GEN_MODELS = [
     "microsoft/Phi-3-mini-4k-instruct",
@@ -143,6 +150,38 @@ def make_lead(article):
     if "»" in lead or "E-mail to a friend" in lead:
         return None
     return lead
+
+
+def make_wire_lead(row):
+    """cc_news title + description: the gate's ag_news humans are headline + wire description."""
+    title = norm(row.get("title") or "")
+    desc = norm(row.get("description") or "")
+    body = norm(row.get("text") or "")
+    head = title if title.endswith((".", "!", "?", ":")) else (title + "." if title else "")
+    if len(head) > MAX_LEAD_CHARS:
+        return None
+    text = (head + " " + desc).strip()
+    if len(text) < MIN_LEAD_CHARS and body:
+        for part in _SENT.split(body):
+            candidate = (text + " " + part.strip()).strip()
+            if len(candidate) > MAX_LEAD_CHARS:
+                break
+            text = candidate
+            if len(text) >= MIN_LEAD_CHARS:
+                break
+    if len(text) > MAX_LEAD_CHARS:
+        text = cut_to_sentence(text, MAX_LEAD_CHARS)
+    if not text:
+        return None
+    if not (MIN_LEAD_CHARS <= len(text) <= MAX_LEAD_CHARS):
+        return None
+    if not text.endswith((".", "!", "?")):
+        return None
+    return text
+
+
+def text_key(text):
+    return hashlib.sha1(norm(text).lower().encode("utf-8", "ignore")).hexdigest()
 
 
 def make_snippet(text):
@@ -294,12 +333,61 @@ def load_stories(count, exclude):
     return stories
 
 
+def load_extra_humans(count, exclude, seen):
+    from datasets import load_dataset
+
+    stage(f"reading {count} more human wire stories from {EXTRA_HUMAN_DATASET}")
+    ds = load_dataset(
+        EXTRA_HUMAN_DATASET, EXTRA_HUMAN_CONFIG, split=EXTRA_HUMAN_SPLIT, streaming=True
+    )
+    stories = []
+    scanned = 0
+    for row in ds:
+        scanned += 1
+        lead = make_wire_lead(row)
+        if lead is None:
+            continue
+        key = text_key(lead)
+        if key in seen:
+            continue
+        seen.add(key)
+        raw_id = str(row.get("url") or key)
+        group = "cc-" + hashlib.sha1(raw_id.encode("utf-8", "ignore")).hexdigest()[:12]
+        if group in exclude:
+            continue
+        stories.append({"group": group, "text": lead, "prompt": make_snippet(lead)})
+        if len(stories) >= count:
+            break
+        if scanned % 20000 == 0:
+            print(
+                f"[news] cc_news scanned {scanned} -> {len(stories)} usable rows"
+                f" | {time.time() - T0:.0f}s",
+                flush=True,
+            )
+    stage(f"cc_news scanned {scanned} -> {len(stories)} usable rows")
+    return stories
+
+
 def human_row(story):
     return {
         "text": story["text"],
         "label": 0,
         "generator": "human",
         "source": DATASET,
+        "prompt": story["prompt"],
+        "domain": "news",
+        "variant": "raw",
+        "bucket": "human",
+        "group": story["group"],
+    }
+
+
+def extra_human_row(story):
+    return {
+        "text": story["text"],
+        "label": 0,
+        "generator": "human",
+        "source": EXTRA_HUMAN_DATASET,
         "prompt": story["prompt"],
         "domain": "news",
         "variant": "raw",
@@ -441,6 +529,8 @@ rows = load_rows()
 stories = {}
 for rec in rows:
     if rec["label"] == 0 and rec["group"] not in stories:
+        if rec.get("source") == EXTRA_HUMAN_DATASET:  # human-only rows: never paired, never generated
+            continue
         stories[rec["group"]] = {
             "text": rec["text"],
             "prompt": rec.get("prompt") or make_snippet(rec["text"]),
@@ -461,6 +551,27 @@ with OUT.open("a", encoding="utf-8") as fh:
             "[news] no usable human leads; check that the dataset split still has an 'article' column"
         )
     print(f"[news] stories ready: {len(stories)}", flush=True)
+
+    existing = load_rows()
+    extra_have = sum(
+        1 for rec in existing if rec["label"] == 0 and rec.get("source") == EXTRA_HUMAN_DATASET
+    )
+    if extra_have < N_EXTRA_HUMANS:
+        extra = load_extra_humans(
+            N_EXTRA_HUMANS - extra_have,
+            {rec["group"] for rec in existing if rec["label"] == 0},
+            {text_key(rec["text"]) for rec in existing},
+        )
+        for story in extra:
+            fh.write(json.dumps(extra_human_row(story), ensure_ascii=False) + "\n")
+        fh.flush()
+        if extra:
+            push(
+                [(OUT, "v2/news_pairs.jsonl")],
+                f"gradientTrace news pairs: {extra_have + len(extra)} cc_news human rows",
+            )
+    else:
+        print(f"[news] cc_news: {extra_have} human rows already present", flush=True)
 
     chosen = []
     for index, model_id in enumerate(GEN_MODELS):
@@ -488,10 +599,15 @@ humans = [rec for rec in rows if rec["label"] == 0]
 ai = [rec for rec in rows if rec["label"] == 1]
 by_model = Counter(rec["generator"] for rec in ai)
 covered = {rec["group"] for rec in ai}
+# cc_news rows are human-only, so they never count as a story needing an AI pair.
+cnn_groups = {
+    rec["group"] for rec in humans if rec.get("source") != EXTRA_HUMAN_DATASET
+}
 meta = {
     "dataset": DATASET,
     "split": SPLIT,
-    "n_stories": len(humans),
+    "extra_human_dataset": EXTRA_HUMAN_DATASET,
+    "n_stories": len(cnn_groups),
     "generators": sorted(by_model),
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
@@ -501,10 +617,11 @@ meta = {
     "snippet_chars": SNIPPET_CHARS,
     "counts": {
         "human": len(humans),
+        "human_sources": dict(Counter(rec.get("source") for rec in humans)),
         "ai": len(ai),
         "ai_by_model": dict(by_model),
-        "stories_with_ai": len(covered),
-        "stories_without_ai": len({rec["group"] for rec in humans} - covered),
+        "stories_with_ai": len(cnn_groups & covered),
+        "stories_without_ai": len(cnn_groups - covered),
     },
     "lengths": {
         "human": length_stats([len(rec["text"]) for rec in humans]),
@@ -521,7 +638,8 @@ push(
     f"gradientTrace news pairs: {meta['n_stories']} stories, {meta['counts']['ai']} AI texts",
 )
 
-print(f"\n[news] human {len(humans)}, ai {len(ai)} {dict(by_model)}", flush=True)
+print(f"\n[news] human {len(humans)} {dict(Counter(rec.get('source') for rec in humans))}", flush=True)
+print(f"[news] ai {len(ai)} {dict(by_model)}", flush=True)
 print(f"[news] lengths: {json.dumps(meta['lengths'])}", flush=True)
 free_gib = torch.cuda.mem_get_info(0)[0] / 2**30
 print(

@@ -201,7 +201,7 @@ raises immediately from `_make_loader`, before that per-source try block.
 | mage | 0.35 | 0.30 | — |
 | raid | 0.40 | 0.45 | 0.80 |
 | arena | — | — | 0.40 |
-| local_jsonl | 0.25 | 0.25 | — |
+| local_jsonl | 0.50 | 0.25 | — |
 
 Behavior (`_select_by_share`):
 
@@ -260,7 +260,10 @@ The loader ignores extra keys, so adding fields to the RAID builder is safe.
 
 `colab/build_news.py` writes the same schema: `domain: news`, `bucket: ai_foundational` on the
 AI rows, `source` = the dataset id (human) or `generated` (AI), and a `group: cnn-<hash>` shared
-by a human lead and its AI texts so they never straddle a split.
+by a human lead and its AI texts so they never straddle a split. Its cc_news rows are
+human-only (`label: 0`, `bucket: human`, `source: vblagoje/cc_news`, `group: cc-<hash>`, no AI
+partner); the loader honours `bucket`, so they land in the human bucket regardless of the
+missing pair.
 
 ### 5.7 Optional length matching
 
@@ -279,7 +282,7 @@ All configs share the model/schedule; only data and Hub targets differ.
 |---|---|---|---|
 | samples / epochs | 150k / 3 | 150k / 3 | 50k / 1 |
 | sources | hc3, pile, mage, arena, local_jsonl | hc3, mage, arena, raid, local_jsonl | same as v2 |
-| shares | none | per 5.3 (local_jsonl 0.25) | per 5.3 (local_jsonl 0.25) |
+| shares | none | per 5.3 (local human 0.50, AI 0.25) | per 5.3 (local human 0.50, AI 0.25) |
 | RAID | no | `data/raid_v2.jsonl` | same |
 | news pairs | — | `data/local.jsonl` from `build_news.py` | same |
 | held-out domain | — | poetry | poetry |
@@ -408,6 +411,19 @@ is at chance and still flags 97% of human text as AI. Internal held-out poetry j
 0.9732 / 0.577, but every poetry human row in the RAID slice is perturbed, so that is partly
 the same shortcut (§7.6).
 
+Clean-news pilot (`external_gate_v1_report_v2-pilot-news.json`, 2026-11-01): the first run
+whose mix actually contains the corpus — local_jsonl 6,903 train rows (3,224 human + 3,679 AI;
+SmolLM2 1,890 + Phi-3 1,789 in `train_generators`), human bucket 16,056, so 20% clean news.
+Gate: news 0.5906 / 0.0350 / 0.9300 (human mean P(AI) 0.9180, AI mean 0.9653), reviews 0.9429 /
+0.4000 / 0.1925, pooled 0.7319 / 0.0963 / 0.5613. The news AUROC gain is almost entirely the AI
+side (0.9318 -> 0.9653), and part of that is prompt recognition: the training AI news was written
+with the gate's own journalist prompt. The human mean barely moved (0.9208 -> 0.9180) and 93% of
+clean ag_news humans still score above 0.5, so the gate is not cleared. The pilot's own
+`domain:news` slice is 0.998 on val and test_indomain — in-domain news is solved; the gate's
+ag_news form (headline + wire description) is unseen. Only 20% of the human bucket is clean news
+and more CNN would repeat the same source; the next test adds human news from many outlets in
+the gate's title+description form.
+
 Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp, so the
 reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
 human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
@@ -448,6 +464,12 @@ and trimmed at a sentence boundary).
 - Humans: `nschantz21/cnn_dailymail-parsed` (parquet copy of CNN/DailyMail 3.0.0), train split,
   `article` field; first sentences until 200 chars, max 520. A lead that does not end on a
   sentence boundary is skipped.
+- Extra humans (human-only, no generation): `vblagoje/cc_news` (`plain_text` config, train
+  split) `title` + `description`, one sentence of body appended if the pair is still under 200
+  chars, cut on a sentence boundary at 520. This is the gate's ag_news form — a headline plus a
+  wire description — from many outlets, and it is why `local_jsonl.human` is 0.5. Rejected:
+  titles over 520 chars, texts with no sentence-ending punctuation, and duplicates of anything
+  already in the file (dedup by normalized lowercase text).
 - Generators: `microsoft/Phi-3-mini-4k-instruct` and `HuggingFaceTB/SmolLM2-1.7B-Instruct`.
   Granite-2B was dropped: its fp16 logits went NaN on the T4 (`probability tensor contains
   either inf, nan or element < 0`). Never Qwen — it is the gate's generator.
@@ -456,21 +478,25 @@ and trimmed at a sentence boundary).
   only 14%). Every progress line prints `[news] rejects: {...}` with the drop reasons and a
   couple of examples, so a low yield is diagnosable instead of silent. A model's rows are
   pushed when it finishes, even if the next model crashes the CUDA context.
-- Output: 4,000 human leads + up to 8,000 AI texts as `v2/news_pairs.jsonl`, plus
-  `v2/news_pairs_meta.json` (counts, per-generator lengths, prompt template). Rows use the
-  `local.jsonl` schema: label 0/1, `domain: news`, `bucket: ai_foundational` (human rows are
-  forced to `human`), and a shared `group` per story so the human and both AI rows never
+- Output: 4,000 CNN human leads + up to 8,000 AI texts + 6,000 cc_news human rows as
+  `v2/news_pairs.jsonl` (~10,000 human / 7,448 AI after the 2026-11-01 build), plus
+  `v2/news_pairs_meta.json` (counts, `human_sources`, per-generator lengths, prompt template).
+  Rows use the `local.jsonl` schema: label 0/1, `domain: news`, `bucket: ai_foundational` for
+  AI and `human` for humans, and a shared `group` per story so the human and both AI rows never
   straddle a split.
 - Resumable: rows are appended and pushed every 200 generations; `REGENERATE=False` restores
-  the pushed file, and a rerun tops up missing stories per model.
+  the pushed file, and a rerun tops up missing stories per model and missing cc_news rows (it
+  counts existing `source: vblagoje/cc_news` rows first, so a rerun does not duplicate them).
 - Wired in by `one_shot_kaggle.py`: for `v2`/`pilot` it downloads the pairs to
-  `data/local.jsonl` and aborts if they are missing (unless `LOCAL_JSONL` is set).
-  `configs/{v2,pilot}.yaml` give `local_jsonl` 0.25 of the human and AI-foundational buckets
-  (~4,000 clean humans at the pilot, 20% of the human bucket). As a second line of defence,
+  `data/local.jsonl` and aborts if they are missing (unless `LOCAL_JSONL` is set). Its guard is
+  1,000 human and 1,000 AI rows, so the file must contain the AI side too — cc_news alone is not
+  enough. `configs/{v2,pilot}.yaml` give `local_jsonl` 0.50 of the human bucket and 0.25 of
+  AI-foundational (~8,000 local rows at the pilot). As a second line of defence,
   `build_datasets` raises if a weighted `local_jsonl` bucket loaded zero rows, so a stale
   notebook cell cannot silently train the old mix.
-- Cost: ~30–60 min per generator on one T4 for 4,000 stories; the dataset is then frozen and
-  reused by later runs. **A rebuilt news file is a data change: set `RESUME=False`.**
+- Cost: ~30–60 min per generator on one T4 for 4,000 stories (the cc_news stage is ~5–10 min of
+  dataset download, no GPU); the dataset is then frozen and reused by later runs. **A rebuilt
+  news file is a data change: set `RESUME=False`.**
 
 ---
 
@@ -604,21 +630,34 @@ state, ~4.4–5 GB per push).
   402 Phi texts before Granite-2B crashed with NaN logits; `min_new_tokens` and the SmolLM2
   swap fixed it. `one_shot_kaggle.py` downloads the pairs into `data/local.jsonl` and refuses
   to train without them; `configs/{v2,pilot}.yaml` give it 0.25 of the human and AI-foundational
-  buckets (4,000 clean news humans = 20% of the pilot human bucket, so ~68% of that bucket is
-  now unperturbed; the local AI side is quota-capped at ~4,545).
+  buckets.
+- **Clean-news pilot (2026-11-01):** the first run whose mix contains the corpus: local_jsonl
+  6,903 train rows (3,224 human + 3,679 AI), human bucket 16,056, so 20% clean news. Internal
+  val 0.9971 / 0.953, in-domain 0.9970 / 0.940, OOD 0.9994 / 0.988, humanized 0.9997 / 0.994,
+  poetry 0.9652 / 0.583; `domain:news` is 0.998 on val and in-domain. Gate
+  (`external_gate_v1_report_v2-pilot-news.json`): news 0.5906 / 0.0350 / 0.9300 (human mean
+  P(AI) 0.9180, AI mean 0.9653), reviews 0.9429 / 0.4000 / 0.1925, pooled 0.7319 / 0.0963 /
+  0.5613. The gain is AI-side (0.9318 -> 0.9653; part of it is recognition of the gate's own
+  journalist prompt, which the training AI news reused). The human side did not move:
+  0.9208 -> 0.9180 and 93% still above 0.5. **Does not clear the gate; do not start the 150k.**
+- **Diagnosis (2026-11-01):** in-domain news is solved (0.998), so this is a source/form shift,
+  not a news failure. The gate's ag_news humans are a headline followed by a wire description
+  (p50 247 chars); training human news is CNN article leads with no headline (p50 248, so not
+  length) plus perturbed RAID BBC news. Only 20% of the human bucket is clean news, and more
+  CNN repeats the same source. The model has never seen the gate's form from many outlets.
 - **Next steps, in order:**
-  1. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) in a **fresh session**
-     (the builder's kernel can still hold GPU memory) with the **current** `one_shot_kaggle.py`
-     re-pasted; a stale cell skips the news download. Expect `news pairs <- … (4000 human,
-     7448 AI …)` before training; `build_datasets` aborts if it is missing. ~607 steps, ~80 min
-     training plus data build and final eval. Verify `manifest["train_sources"]` shows the local
-     source with ~4,000 human and ~4,545 AI rows, and that the human bucket still has
-     hc3/mage/raid/local.
-  2. Gate it (`MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`, `MODEL_LABEL="v2-pilot-news"`,
-     `GATE_NAME="external_gate_v1"`, `REGENERATE=False`, `PUSH=True`). Success is the news
-     slice moving off 0.4775 / 0.0125 / 0.9700; report news first, then pooled (reviews is
-     Yelp-seen and will flatter the pooled line).
-  3. Only after the news slice moves, consider the 150k run — and fix the frontier supply first.
+  1. **Implemented, not yet run (2026-11-01):** `build_news.py` now also appends 6,000
+     human-only `vblagoje/cc_news` rows (title + description, 200–520 chars, sentence
+     boundary, deduped) and `configs/{v2,pilot}.yaml` raise `local_jsonl.human` to 0.5 (AI
+     stays 0.25). Rerun the builder (it restores the 4,000 CNN leads + 7,448 AI from the Hub,
+     then adds the cc_news rows; expect ~10,000 human / 7,448 AI) and check for
+     `[news] cc_news scanned ... -> 6000 usable rows`. No GPU generation and no prompt change,
+     so this is the cheapest test of the human-form hypothesis.
+  2. Re-pilot (`RESUME=False`, fresh session) and gate (`MODEL_LABEL="v2-pilot-ccnews"`).
+     Success is news human mean P(AI) below ~0.7 and FPR@0.5 below ~0.6 while news AI mean
+     stays above ~0.9. If both means fall, the humans taught "news = human" and the next build
+     must pair the new humans with AI rewrites (one generator per story) instead.
+  3. Only after the human side moves, consider the 150k run — and fix the frontier supply first.
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---

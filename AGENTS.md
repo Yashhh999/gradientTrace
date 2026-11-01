@@ -457,6 +457,10 @@ Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp
 reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
 human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
 
+The cell aborts when `MODEL_ID` is still `GATE_REPO` while `MODEL_LABEL` is not `v1`: on
+2026-11-01 a `v2-pilot-short2` run left `MODEL_ID` at the default and silently re-scored v1
+(its report reproduced the v1 baseline exactly, with `"model": "Yashhh999/gradientTrace"`).
+
 ### 7.6 RAID extractor (`colab/build_raid.py`)
 
 One-time, resumable, CPU-only. RAID `train.csv` is an 11.8 GB CSV with domains in contiguous
@@ -611,6 +615,7 @@ state, ~4.4–5 GB per push).
 | `PjRt … premapped_buffer_size` | libtpu too old (torch_xla pin) | restore the libtpu `torch_tpu` declares |
 | torch_tpu “no extension module compatible” | torch outside 2.11–2.15 | reinstall a supported torch build (cell handles 2.14.1) |
 | internal AUROC 0.9999 but humans flagged | source confounding | ignore internal numbers; run the gate |
+| gate numbers equal the v1 baseline / report `model` is `Yashhh999/gradientTrace` | `MODEL_ID` left at the default while `MODEL_LABEL` was changed | set `MODEL_ID` to the model under test; the cell now aborts on this |
 | gate flags ~97% of humans as AI; pooled AUROC ~0.5-0.6 | a source's labels are inverted (MAGE ships 1 = human, 0 = machine) | use `mage`, not `hf:yaful/MAGE`; check every new source's label convention |
 | gate ~0.96 on reviews but ~0.48 on news, 97% of news humans flagged | training humans are perturbed in news/reddit/books/poetry, clean only in reviews/wiki/recipes; AI is clean everywhere | train on the paired clean-news set (`colab/build_news.py`); it is downloaded automatically into `data/local.jsonl` |
 | `paired clean news missing` when the training cell starts | `v2/news_pairs.jsonl` has not been built/pushed, or `NEWS_HUB` is wrong | run `colab/build_news.py` (it appends/pushes partials), or point `LOCAL_JSONL` at your own paired file |
@@ -724,20 +729,20 @@ state, ~4.4–5 GB per push).
   parent. The model learned "short news = AI" on top of the form fix. Length is still not the
   only cue (news AUROC 0.91, matched AUROC 0.88), but the human score distribution shifted up
   as a whole (p50 0.25 -> 0.48), which fits a length threshold near the gate's 247-char median.
+- **Balanced-shorts pilot (2026-11-01):** corpus 18,589 human / 14,999 AI (8,589 short humans =
+  6,000 cc_news + 2,589 paired CNN; 7,002 short AI), local 10,481 train rows, train 38,571.
+  Internal val 0.9960 / 0.933, in-domain 0.9960 / 0.928, OOD 0.9992 / 0.984, humanized 0.9999 /
+  0.997, poetry 0.9651 / 0.476. **Gate pending:** the first attempt left `MODEL_ID` at the v1
+  repo, so `external_gate_v1_report_v2-pilot-short2.json` is the v1 baseline (news 0.4587 /
+  0.0050 / 0.9550, pooled 0.5270) under the new label, not this model. Re-run with
+  `MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`; the cell now aborts on that mistake.
 - **Next steps, in order:**
-  1. **Implemented, not yet run (2026-11-01):** every CNN lead now gets a paired first-sentence
-     human variant (~2,700 of 4,000 leads yield one) and the short cc_news stage rises to 6,000
-     briefs, so short humans reach ~8,700 of ~18,700 and the pilot's local pool cap sees 50/50
-     short/long, matching the AI side (short AI is 50% of the local AI pool). No config change:
-     `min_chars: 100`, `local_jsonl` human 0.5 / AI 0.4 stay. Rerun the builder (it restores the
-     14k human / 14,984 AI file, adds ~2,700 CNN + 2,000 cc shorts) -> ~18.7k human / ~15k AI;
-     check `[news] human short ...` and `meta.counts.human_short_sources` show both CNN and
-     cc_news. No GPU generation.
-  2. Re-pilot (`RESUME=False`, fresh session) and gate (`MODEL_LABEL="v2-pilot-short2"`).
-     Success is news human mean back toward <=0.4 and FPR@0.5 <=0.36 while TPR@1% FPR stays
-     >=0.5 and AI mean stays >=0.9. If the human mean still sits near 0.5, the cue is not
-     short-specific; the next lever is human weight or threshold calibration, not more shorts.
-  3. Only after the human side recovers, consider the 150k run — and fix the frontier supply
+  1. Gate the trained model (`MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`,
+     `MODEL_LABEL="v2-pilot-short2"`, `REGENERATE=False`). Success is news human mean back
+     toward <=0.4 and FPR@0.5 <=0.36 while TPR@1% FPR stays >=0.5 and AI mean stays >=0.9.
+     If the human mean still sits near 0.5, the cue is not short-specific; the next lever is
+     human weight or threshold calibration, not more shorts.
+  2. Only after the human side recovers, consider the 150k run — and fix the frontier supply
      first (~20.4k of 30k at 150k).
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 

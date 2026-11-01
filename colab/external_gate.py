@@ -18,6 +18,13 @@ REGENERATE = False    # True rebuilds and re-pushes the frozen JSONL
 BATCH_SIZE = 32       # detector eval; an OOM halves it
 PUSH = True
 
+if MODEL_ID.rstrip("/") == GATE_REPO and MODEL_LABEL != "v1":
+    raise SystemExit(
+        f"[gate] MODEL_ID is still the gate repo {GATE_REPO} (the v1 detector) while "
+        f"MODEL_LABEL={MODEL_LABEL!r}; this would score v1 and file it under the new label. "
+        "Set MODEL_ID to the model under test (e.g. Yashhh999/gradientTrace-v2-pilot)."
+    )
+
 import importlib.util
 import json
 import logging

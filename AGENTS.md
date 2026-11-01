@@ -597,32 +597,28 @@ state, ~4.4–5 GB per push).
   (0 clean), books 591,329 (0 clean). Poetry hit Python's csv field limit (131,072) and the
   probe stopped. The extractor's caps were not why the slice looked clean-less; RAID train
   simply has no clean human news to give.
-- **Clean-news builder (2026-11-01):** `colab/build_news.py` pairs 4,000 CNN/DailyMail leads
-  with AI news from Phi-3-mini and SmolLM2 using the gate's own prompt, and pushes
-  `v2/news_pairs.jsonl`. The first pass pushed the 4,000 human leads but only 402 Phi-3 texts
-  (14% kept; most completions ended below 200 chars) before Granite-2B crashed with NaN logits
-  in fp16; it is resumable and tops up the missing stories. The cell now forces
-  `min_new_tokens≈human tokens`, prints rejection reasons, pushes after each model, and uses
-  SmolLM2 instead of Granite. `one_shot_kaggle.py` downloads the pairs into `data/local.jsonl`
-  and refuses to train without them; `configs/{v2,pilot}.yaml` give it 0.25 of the human and
-  AI-foundational buckets (~4,000 clean news humans = 20% of the pilot human bucket, so ~68% of
-  that bucket is now unperturbed).
+- **Clean-news builder (2026-11-01):** complete. `v2/news_pairs.jsonl` holds 4,000 human
+  leads + 7,448 AI texts (Phi-3 3,621, SmolLM2 3,827), 3,979 stories covered and 3,469 with
+  both generators; no duplicates or sub-200-char rows. Rejections: 486 short, 4 preamble,
+  62 no_sentence. AI p50 is 337 chars vs human 248 (capped at 1.6×). The first pass kept only
+  402 Phi texts before Granite-2B crashed with NaN logits; `min_new_tokens` and the SmolLM2
+  swap fixed it. `one_shot_kaggle.py` downloads the pairs into `data/local.jsonl` and refuses
+  to train without them; `configs/{v2,pilot}.yaml` give it 0.25 of the human and AI-foundational
+  buckets (4,000 clean news humans = 20% of the pilot human bucket, so ~68% of that bucket is
+  now unperturbed; the local AI side is quota-capped at ~4,545).
 - **Next steps, in order:**
-  1. Rerun `colab/build_news.py` (fresh Kaggle GPU session, ~1 h). It is resumable: the Hub
-     already holds 4,000 human leads and 402 Phi-3 texts, and the rerun tops up the rest with
-     Phi-3 + SmolLM2. Check the `[news] rejects:` counters and `v2/news_pairs_meta.json`; the
-     file is frozen and reused by every later run.
-  2. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) in a **fresh session**
+  1. Rerun the pilot (`RUN="full"`, `CONFIG="pilot"`, `RESUME=False`) in a **fresh session**
      (the builder's kernel can still hold GPU memory) with the **current** `one_shot_kaggle.py`
-     re-pasted; a stale cell skips the news download. Expect `news pairs <- …` before training;
-     `build_datasets` now aborts if it is missing. ~607 steps, ~80 min training plus data build
-     and final eval. Verify `manifest["train_sources"]` shows the local source with ~4k human
-     and ~4.5k AI rows, and that the human bucket still has hc3/mage/raid/local.
-  3. Gate it (`MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`, `MODEL_LABEL="v2-pilot-news"`,
+     re-pasted; a stale cell skips the news download. Expect `news pairs <- … (4000 human,
+     7448 AI …)` before training; `build_datasets` aborts if it is missing. ~607 steps, ~80 min
+     training plus data build and final eval. Verify `manifest["train_sources"]` shows the local
+     source with ~4,000 human and ~4,545 AI rows, and that the human bucket still has
+     hc3/mage/raid/local.
+  2. Gate it (`MODEL_ID="Yashhh999/gradientTrace-v2-pilot"`, `MODEL_LABEL="v2-pilot-news"`,
      `GATE_NAME="external_gate_v1"`, `REGENERATE=False`, `PUSH=True`). Success is the news
      slice moving off 0.4775 / 0.0125 / 0.9700; report news first, then pooled (reviews is
      Yelp-seen and will flatter the pooled line).
-  4. Only after the news slice moves, consider the 150k run — and fix the frontier supply first.
+  3. Only after the news slice moves, consider the 150k run — and fix the frontier supply first.
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---

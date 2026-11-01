@@ -8,8 +8,10 @@
 # alone did not transfer: the gate still scored clean ag_news humans at mean P(AI) 0.918.
 # It also writes short variants (first sentence / short wire brief, 100-240 chars): the gate's
 # Qwen news is 1.3 sentences (p50 134 chars) while every generated AI row was 220+ chars, so
-# length alone separated the classes. Output: v2/news_pairs.jsonl on the Hub, restored by
-# colab/one_shot_kaggle.py into data/local.jsonl.
+# length alone separated the classes. Every CNN lead and AI text gets a paired first-sentence
+# variant so short news is not implicitly AI, and cc_news contributes published short briefs.
+# Output: v2/news_pairs.jsonl on the Hub, restored by colab/one_shot_kaggle.py into
+# data/local.jsonl.
 HUB_ID = "Yashhh999/gradientTrace"
 DATASET = "nschantz21/cnn_dailymail-parsed"  # parquet copy of CNN/DailyMail 3.0.0
 SPLIT = "train"
@@ -18,10 +20,10 @@ EXTRA_HUMAN_DATASET = "vblagoje/cc_news"  # title + description wire stories, ma
 EXTRA_HUMAN_CONFIG = "plain_text"
 EXTRA_HUMAN_SPLIT = "train"
 N_EXTRA_HUMANS = 6000         # human-only rows; the 4,000 CNN leads cover only 20% of the bucket
-N_SHORT_HUMANS = 4000         # 100-199 chars; the gate's humans are p25 202 / p10 159
+N_SHORT_HUMANS = 6000         # cc_news briefs; with the CNN first sentences this matches the AI short share
 SHORT_LEAD_CHARS = 100
-SHORT_AI_MIN = 100            # one gate-length sentence; data.min_chars is 100 in v2/pilot
-SHORT_AI_MAX = 240            # gate AI p95 is 223 chars
+SHORT_MIN = 100               # one gate-length sentence; data.min_chars is 100 in v2/pilot
+SHORT_MAX = 240               # gate AI p95 is 223 chars
 TARGET_GENERATORS = 2
 GEN_MODELS = [
     "microsoft/Phi-3-mini-4k-instruct",
@@ -188,15 +190,15 @@ def make_wire_lead(row, min_chars=MIN_LEAD_CHARS, max_chars=MAX_LEAD_CHARS, cut=
     return text
 
 
-def make_short_ai(text):
-    """First sentence of a generated AI news text, the gate's Qwen output shape."""
+def make_short(text):
+    """First sentence of a news text, the gate's 1-3 sentence output shape."""
     ends = [match.end() for match in _END.finditer(text)]
     if not ends:
         return None
     cut = text[: ends[0]].strip()
-    if len(cut) < SHORT_AI_MIN and len(ends) > 1:
+    if len(cut) < SHORT_MIN and len(ends) > 1:
         cut = text[: ends[1]].strip()
-    if not (SHORT_AI_MIN <= len(cut) <= SHORT_AI_MAX):
+    if not (SHORT_MIN <= len(cut) <= SHORT_MAX):
         return None
     return cut
 
@@ -429,25 +431,31 @@ def interleave(groups):
 
 
 def add_short_variants():
-    """Write a gate-length variant next to every AI row and interleave the file by variant."""
+    """Pair each CNN lead and AI text with a gate-length first sentence, then interleave."""
     rows = load_rows()
     have_short = {
-        rec["group"] for rec in rows if rec["label"] == 1 and rec.get("variant") == "short"
+        (rec["label"], rec["group"]) for rec in rows if rec.get("variant") == "short"
     }
     expanded = []
-    added = 0
+    added_ai = 0
+    added_human = 0
     for rec in rows:
         expanded.append(rec)
-        if rec["label"] != 1 or rec["group"] in have_short:
+        if (rec["label"], rec["group"]) in have_short:
             continue
-        text = make_short_ai(rec["text"])
+        if rec["label"] == 0 and rec.get("source") != DATASET:
+            continue  # cc_news briefs come from their own stage; long cc rows have no AI pair
+        text = make_short(rec["text"])
         if text is None or text == rec["text"]:
             continue
         short = dict(rec)
         short["text"] = text
         short["variant"] = "short"
         expanded.append(short)
-        added += 1
+        if rec["label"] == 1:
+            added_ai += 1
+        else:
+            added_human += 1
     humans = [rec for rec in expanded if rec["label"] == 0]
     ai = [rec for rec in expanded if rec["label"] == 1]
     ordered = interleave(
@@ -466,7 +474,7 @@ def add_short_variants():
         for rec in ordered:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     tmp.replace(OUT)
-    return added
+    return added_ai, added_human
 
 
 def ai_prompt(tok, story):
@@ -601,7 +609,7 @@ restore()
 rows = load_rows()
 stories = {}
 for rec in rows:
-    if rec["label"] == 0 and rec["group"] not in stories:
+    if rec["label"] == 0 and rec.get("variant") != "short" and rec["group"] not in stories:
         if rec.get("source") == EXTRA_HUMAN_DATASET:  # human-only rows: never paired, never generated
             continue
         stories[rec["group"]] = {
@@ -699,12 +707,15 @@ with OUT.open("a", encoding="utf-8") as fh:
     if not chosen:
         raise SystemExit("[news] no generator model could be loaded; nothing was paired")
 
-short_added = add_short_variants()
-if short_added:
-    stage(f"wrote {short_added} short AI news variants and rebalanced the file")
+short_ai_added, short_human_added = add_short_variants()
+if short_ai_added or short_human_added:
+    stage(
+        f"wrote {short_human_added} short human leads and {short_ai_added} short AI variants"
+        " and rebalanced the file"
+    )
     push(
         [(OUT, "v2/news_pairs.jsonl")],
-        f"gradientTrace news pairs: {short_added} short AI variants",
+        f"gradientTrace news pairs: {short_ai_added} short AI, {short_human_added} short human",
     )
 
 rows = load_rows()
@@ -730,11 +741,12 @@ meta = {
     "system": SYSTEM,
     "instruction": INSTRUCTION,
     "lead_chars": [MIN_LEAD_CHARS, MAX_LEAD_CHARS],
-    "short_ai_chars": [SHORT_AI_MIN, SHORT_AI_MAX],
+    "short_chars": [SHORT_MIN, SHORT_MAX],
     "snippet_chars": SNIPPET_CHARS,
     "counts": {
         "human": len(humans),
         "human_short": len(short_humans),
+        "human_short_sources": dict(Counter(rec.get("source") for rec in short_humans)),
         "human_sources": dict(Counter(rec.get("source") for rec in humans)),
         "ai": len(ai),
         "ai_short": len(short_ai),
@@ -762,7 +774,11 @@ push(
 )
 
 print(f"\n[news] human {len(humans)} {dict(Counter(rec.get('source') for rec in humans))}", flush=True)
-print(f"[news] human short {len(short_humans)}", flush=True)
+print(
+    f"[news] human short {len(short_humans)}"
+    f" {dict(Counter(rec.get('source') for rec in short_humans))}",
+    flush=True,
+)
 print(f"[news] ai {len(ai)} ({len(short_ai)} short) {dict(by_model)}", flush=True)
 print(f"[news] lengths: {json.dumps(meta['lengths'])}", flush=True)
 free_gib = torch.cuda.mem_get_info(0)[0] / 2**30

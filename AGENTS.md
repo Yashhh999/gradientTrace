@@ -440,6 +440,19 @@ the AI side — only 23% of Qwen news is caught at 1% FPR, 19% of AI scores belo
 1% threshold sits at human p99 = 0.9958. Reviews barely moved (0.9429 -> 0.9293). Not shippable,
 but this is the first model that separates news at all.
 
+Short-variant pilot (`external_gate_v1_report_v2-pilot-short.json`, 2026-11-01): the length fix
+moved the AI side. Corpus 14,000 human / 14,984 AI (7,001 short AI texts); local_jsonl supplied
+10,512 train rows and news became 14,017 of 38,636 train rows (36%). Gate: news 0.9108 / 0.5400
+/ 0.4975 (human mean 0.3746 -> 0.5095, p50 0.2457 -> 0.4824; AI mean 0.7876 -> 0.9359; the 1%
+threshold is 0.9968 = human p99), reviews 0.9526 / 0.4950 / 0.1175 (improved), pooled 0.9032 /
+0.4263 / 0.3075, pairwise 0.9463, matched 0.8761. News AUROC +0.10 and TPR@1% FPR +0.31 — 54%
+of Qwen news is caught when clean humans are allowed 1% false positives — but FPR@0.5 rose 0.14:
+the model now calls half the clean humans AI at the default threshold. Cause: short AI rows were
+47% of the AI corpus while short humans were only 29% and every short human was an unpaired
+cc_news brief, so the model learned "short news = AI" on top of the form fix. The next build
+pairs every CNN lead with a first-sentence human variant and raises cc briefs to 6,000, which
+balances short exposure (50/50 in the local pool) without touching the configs.
+
 Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp, so the
 reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
 human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
@@ -490,10 +503,14 @@ and trimmed at a sentence boundary).
   gate's Qwen news is 1.3 sentences (p5/p50/p95 = 78/134/223 chars) while every training AI row
   was 220+ chars (p50 331, 3.8 sentences) — zero overlap, so short clean text read as human.
   `add_short_variants()` writes the first sentence of each AI text (100–240 chars, i.e. the
-  gate's shape) as a `variant: short` row, and the short cc_news stage appends human briefs that
-  are already 100–199 chars as published (never a prefix of a longer article). It then rewrites
-  the file interleaving short and long rows, because the per-source pool cap in `data.py` takes
-  rows in file order and would otherwise see only one variant.
+  gate's shape) as a `variant: short` row plus the first sentence of the CNN lead that prompted
+  it, so every short AI text has a same-story human counterpart (~68% of leads yield one), and
+  the short cc_news stage appends human briefs that are already 100–199 chars as published
+  (never a prefix of a longer article). AI-only shorts were not enough: the first short pilot
+  caught 54% of Qwen news at 1% FPR but pushed the median clean human to 0.48, i.e. the model
+  also learned "short = AI". The file is rewritten interleaving short and long rows, because
+  the per-source pool cap in `data.py` takes rows in file order and would otherwise see only
+  one variant.
 - Generators: `microsoft/Phi-3-mini-4k-instruct` and `HuggingFaceTB/SmolLM2-1.7B-Instruct`.
   Granite-2B was dropped: its fp16 logits went NaN on the T4 (`probability tensor contains
   either inf, nan or element < 0`). Never Qwen — it is the gate's generator.
@@ -502,9 +519,10 @@ and trimmed at a sentence boundary).
   only 14%). Every progress line prints `[news] rejects: {...}` with the drop reasons and a
   couple of examples, so a low yield is diagnosable instead of silent. A model's rows are
   pushed when it finishes, even if the next model crashes the CUDA context.
-- Output: 4,000 CNN human leads + up to 8,000 AI texts, 6,000 long cc_news humans, 4,000 short
-  cc_news human briefs, and one short variant per generated AI text as `v2/news_pairs.jsonl`
-  (~14,000 human / ~13,000 AI after the 2026-11-01 short build), plus
+- Output: 4,000 CNN human leads + up to 8,000 AI texts, 6,000 long cc_news humans, 6,000 short
+  cc_news human briefs, ~2,700 paired CNN first sentences, and one short variant per generated
+  AI text as `v2/news_pairs.jsonl` (~18,700 human / ~15,000 AI after the 2026-11-01 balanced
+  build), plus
   `v2/news_pairs_meta.json` (counts, `human_sources`, per-generator lengths including the short
   variants, prompt template). Rows use the `local.jsonl` schema: label 0/1, `domain: news`,
   `bucket: ai_foundational` for AI and `human` for humans, and a shared `group` per story so
@@ -522,9 +540,9 @@ and trimmed at a sentence boundary).
   survive the loader. As a second line of defence, `build_datasets` raises if a weighted
   `local_jsonl` bucket loaded zero rows, so a stale notebook cell cannot silently train the
   old mix.
-- Cost: ~30–60 min per generator on one T4 for 4,000 stories (the cc_news stage is ~5–10 min of
-  dataset download, no GPU); the dataset is then frozen and reused by later runs. **A rebuilt
-  news file is a data change: set `RESUME=False`.**
+- Cost: ~30–60 min per generator on one T4 for 4,000 stories (the two cc_news stages are
+  ~10–20 min of dataset streaming, no GPU); the dataset is then frozen and reused by later runs.
+  **A rebuilt news file is a data change: set `RESUME=False`.**
 
 ---
 
@@ -692,20 +710,34 @@ state, ~4.4–5 GB per push).
   saw a short AI news brief cannot score one. Content was ruled out: content-word recall of the
   gate's topic is 0.41 (Qwen) vs 0.44 (Phi) / 0.54 (SmolLM), and first-sentence lengths already
   match the gate (p50 124), so truncation reproduces the gate shape (sampled short AI p50 135).
+- **Short-variant pilot (2026-11-01):** the AI side moved and the bottleneck is human
+  calibration. Corpus 14,000 human / 14,984 AI (7,001 short AI), local 10,512 train rows, train
+  news 14,017 of 38,636 (36%). Internal val 0.9960 / 0.933, in-domain 0.9956 / 0.931, OOD
+  0.9992 / 0.983, humanized 0.9998 / 0.994, poetry 0.9593 / 0.470 (down from 0.9713 / 0.623).
+  Gate (`external_gate_v1_report_v2-pilot-short.json`): news 0.9108 / 0.5400 / 0.4975 (human
+  mean 0.3746 -> 0.5095, p50 0.2457 -> 0.4824; AI mean 0.7876 -> 0.9359; 1% threshold 0.9968 =
+  human p99), reviews 0.9526 / 0.4950 / 0.1175 (better), pooled 0.9032 / 0.4263 / 0.3075 (pair
+  0.9463, matched 0.8761). News AUROC +0.10 and TPR@1% FPR +0.31, but FPR@0.5 +0.14. **Not
+  shippable**; the model now ranks news well but calls half the clean humans AI at 0.5.
+- **Cause (2026-11-01):** short AI rows were 47% of the AI corpus but short humans only 29%,
+  and every short human was an unpaired cc_news brief while every short AI text had a long
+  parent. The model learned "short news = AI" on top of the form fix. Length is still not the
+  only cue (news AUROC 0.91, matched AUROC 0.88), but the human score distribution shifted up
+  as a whole (p50 0.25 -> 0.48), which fits a length threshold near the gate's 247-char median.
 - **Next steps, in order:**
-  1. **Implemented, not yet run (2026-11-01):** `build_news.py` adds 4,000 short cc_news human
-     briefs (100–199 chars as published) and a `variant: short` first-sentence copy of every AI
-     news text (100–240 chars), interleaves short/long rows so the load-time pool cap sees both,
-     and `configs/{v2,pilot}.yaml` set `min_chars: 100` and `local_jsonl.ai_foundational: 0.4`
-     (human stays 0.5). Rerun the builder (it restores the current ~11.4k rows from the Hub,
-     then appends; expect ~14k human / ~13k AI) and check `[news] short ...` / the meta
-     `counts.human_short` and `counts.ai_short`. No GPU generation and no prompt change.
-  2. Re-pilot (`RESUME=False`, fresh session) and gate (`MODEL_LABEL="v2-pilot-short"`).
-     Success is news AI mean rising toward >=0.9 and TPR@1% FPR materially above 0.2325 while
-     FPR@0.5 stays near/below ~0.36 and the human mean stays near ~0.37. If the human mean
-     rises instead, the model learned "short = AI" and the short humans need more weight (or
-     paired short AI per human brief); if both fall, the variants are too formulaic.
-  3. Only after the short-AI side moves, consider the 150k run — and fix the frontier supply
+  1. **Implemented, not yet run (2026-11-01):** every CNN lead now gets a paired first-sentence
+     human variant (~2,700 of 4,000 leads yield one) and the short cc_news stage rises to 6,000
+     briefs, so short humans reach ~8,700 of ~18,700 and the pilot's local pool cap sees 50/50
+     short/long, matching the AI side (short AI is 50% of the local AI pool). No config change:
+     `min_chars: 100`, `local_jsonl` human 0.5 / AI 0.4 stay. Rerun the builder (it restores the
+     14k human / 14,984 AI file, adds ~2,700 CNN + 2,000 cc shorts) -> ~18.7k human / ~15k AI;
+     check `[news] human short ...` and `meta.counts.human_short_sources` show both CNN and
+     cc_news. No GPU generation.
+  2. Re-pilot (`RESUME=False`, fresh session) and gate (`MODEL_LABEL="v2-pilot-short2"`).
+     Success is news human mean back toward <=0.4 and FPR@0.5 <=0.36 while TPR@1% FPR stays
+     >=0.5 and AI mean stays >=0.9. If the human mean still sits near 0.5, the cue is not
+     short-specific; the next lever is human weight or threshold calibration, not more shorts.
+  3. Only after the human side recovers, consider the 150k run — and fix the frontier supply
      first (~20.4k of 30k at 150k).
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 

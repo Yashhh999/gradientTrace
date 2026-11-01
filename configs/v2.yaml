@@ -69,10 +69,11 @@ data:
     # data/local.jsonl is the clean-news set from colab/build_news.py: 4k CNN leads paired
     # with AI news, plus 6k human-only cc_news title+description rows. RAID's news humans are
     # all perturbed while its AI rows are clean, so without clean human news the model learns
-    # "clean prose = AI" and fails the gate's news slice. The human weight is 0.5 because the
-    # gate's ag_news form (headline + wire description) was not covered by CNN leads alone.
+    # "clean prose = AI" and fails the gate's news slice. Human weight 1.0: at 0.5 the pilot's
+    # local quota was 6,667 rows and the gate's short humans still scored 0.43; 1.0 lifts the
+    # quota to 10,000 and takes it from hc3/mage/raid, not the AI side.
     local_jsonl:
-      human: 0.5
+      human: 1.0
       ai_foundational: 0.4
   local_jsonl: data/local.jsonl
   raid_jsonl: data/raid_v2.jsonl

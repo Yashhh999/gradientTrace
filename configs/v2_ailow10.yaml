@@ -1,0 +1,79 @@
+# v2 with the local news-AI share cut 0.25 -> 0.10.
+# Every 150k build flagged 60-71% of clean ag_news humans at 0.5 regardless of step budget
+# (607 / 1,755 / 5,265), while the 50k pilot with the same 0.25 weight flagged 24.75%. The
+# 150k local quota is 12,000 AI rows vs the pilot's 4,000, so per-batch exposure to the
+# journalist-prompt/short-AI contrast is ~3x; this config tests that as the cause.
+seed: 42
+backbone: microsoft/deberta-v3-large
+max_length: 512
+
+head:
+  dropout: 0.1
+  pooling: cls
+
+train:
+  output_dir: runs/gradientTrace-v2-ailow10
+  epochs: 3
+  lr: 1.5e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.10
+  max_grad_norm: 1.0
+  per_device_batch_size: auto
+  grad_accum: auto
+  precision: auto
+  gradient_checkpointing: true
+  early_stopping_patience: 0
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  dataloader_workers: auto
+  log_every: 25
+  max_steps: -1
+
+data:
+  total_samples: 150000
+  min_chars: 100
+  max_chars: 12000
+  mix:
+    human: 0.40
+    ai_foundational: 0.40
+    ai_frontier: 0.20
+  val_frac: 0.10
+  test_frac: 0.10
+  max_humanized_frac: 0.25
+  held_out_generators: [llama-2, mistral, gemini, qwen]
+  frontier_patterns: [gpt-4, gpt-5, gpt4, o1, o3, claude, gemini, grok, llama-3, llama3, mistral-large, deepseek, qwen, command-r]
+  sources: [hc3, mage, arena, raid, local_jsonl]
+  source_shares:
+    hc3:
+      human: 0.25
+      ai_foundational: 0.10
+    mage:
+      human: 0.35
+      ai_foundational: 0.30
+    raid:
+      human: 0.40
+      ai_foundational: 0.45
+      ai_frontier: 0.80
+    arena:
+      ai_frontier: 0.40
+    local_jsonl:
+      human: 0.5
+      ai_foundational: 0.10
+  local_jsonl: data/local.jsonl
+  raid_jsonl: data/raid_v2.jsonl
+  scan_limit_per_source: 400000
+  ood_cap: 8000
+  length_match: false
+  length_bins: [0, 500, 1000, 2000, 4000]
+  held_out_domains: [poetry]
+
+hub:
+  model_id: Yashhh999/gradientTrace-v2-ailow10
+  push: false
+  private: true
+  checkpoint_strategy: checkpoint
+
+wandb:
+  enabled: false
+  project: gradienttrace

@@ -12,3 +12,6 @@ data/*.jsonl
 *.safetensors
 *.bin
 *.pt
+
+# fitted hybrid artifacts (embeddings bank + fusion weights)
+hybrid_fusion/

@@ -87,6 +87,68 @@ def predict_probs(
     return probs
 
 
+def predict_probs_and_embeddings(
+    model,
+    tokenizer,
+    samples,
+    device,
+    max_length: int = 512,
+    batch_size: int = 16,
+    pad_to_max: bool = False,
+    desc: str = "embed",
+):
+    """Probabilities plus the pooled representation the classifier head consumes.
+
+    One forward pass per batch: the logit is recomputed from the pooled vector instead of
+    calling ``forward``, which is bit-equivalent in eval mode (the head dropout is identity).
+    """
+    import torch
+
+    model.eval()
+    device = torch.device(device)
+    count = len(samples)
+    if count == 0:
+        return np.zeros(0, dtype=np.float32), np.zeros((0, 0), dtype=np.float32)
+
+    order = sorted(range(count), key=lambda i: len(samples[i].text))
+    starts = range(0, count, batch_size)
+    batches = len(starts)
+    use_amp = device.type == "cuda"
+    probs = np.zeros(count, dtype=np.float32)
+    vectors = None
+    bar = _progress(batches, desc)
+
+    with torch.inference_mode():
+        for step, start in enumerate(starts, 1):
+            index = order[start : start + batch_size]
+            enc = tokenizer(
+                [samples[i].text for i in index],
+                truncation=True,
+                max_length=max_length,
+                padding="max_length" if pad_to_max else True,
+                return_tensors="pt",
+            )
+            enc = {k: v.to(device) for k, v in enc.items()}
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                pooled = model.encode(**enc)
+                logits = model.classifier(model.dropout(pooled)).float()
+            if use_amp and not torch.isfinite(logits).all():
+                with torch.autocast(device_type="cuda", enabled=False):
+                    pooled = model.encode(**enc).float()
+                    logits = model.classifier(model.dropout(pooled)).float()
+            probs[index] = torch.sigmoid(logits).reshape(-1).cpu().numpy()
+            chunk = pooled.float().cpu().numpy()
+            if vectors is None:
+                vectors = np.zeros((count, chunk.shape[1]), dtype=np.float32)
+            vectors[index] = chunk
+            if bar is not None:
+                bar.update(1)
+
+    if bar is not None:
+        bar.close()
+    return probs, vectors
+
+
 def evaluate_slices(
     model,
     tokenizer,

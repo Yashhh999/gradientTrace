@@ -55,19 +55,26 @@ class AIDetector(PreTrainedModel):
     def gradient_checkpointing_disable(self):
         self.encoder.gradient_checkpointing_disable()
 
-    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, labels=None, **kwargs):
+    def pool(self, hidden, attention_mask=None):
+        if self.pooling == "mean" and attention_mask is not None:
+            mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+            return (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+        return hidden[:, 0]
+
+    def encode(self, input_ids=None, attention_mask=None, token_type_ids=None, **kwargs):
+        """Pooled representation, identical to what the classifier head consumes."""
         encoder_inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
         if token_type_ids is not None:
             encoder_inputs["token_type_ids"] = token_type_ids
         outputs = self.encoder(**encoder_inputs)
-        hidden = outputs.last_hidden_state
+        return self.pool(outputs.last_hidden_state, attention_mask)
 
-        if self.pooling == "mean" and attention_mask is not None:
-            mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
-            pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
-        else:
-            pooled = hidden[:, 0]
-
+    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, labels=None, **kwargs):
+        pooled = self.encode(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+        )
         logits = self.classifier(self.dropout(pooled)).squeeze(-1)
         loss = None
         if labels is not None:

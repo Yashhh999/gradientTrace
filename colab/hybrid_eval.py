@@ -143,7 +143,11 @@ def main():
         print("  " + fmt(name + "/news", oof, y, news))
         print("  " + fmt(name + "/reviews", oof, y, revs))
         order = np.argsort(-np.abs(coefs.mean(axis=0)))[:8]
-        print("  top coefs " + "  ".join("%s %+.2f" % (cols[i], coefs.mean(axis=0)[i]) for i in order))
+        mean = coefs.mean(axis=0)
+        agree = (np.sign(coefs) == np.sign(mean)).mean(axis=0)
+        print("  top coefs " + "  ".join(
+            "%s %+.2f(%d%%)" % (cols[i], mean[i], round(100 * agree[i])) for i in order
+        ))
 
     tpr1, thr1 = operating(det_p, y, 0.01)
     ship = "hybrid all"

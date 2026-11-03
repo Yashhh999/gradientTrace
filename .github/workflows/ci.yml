@@ -18,3 +18,5 @@ jobs:
         run: python -m compileall -q gradienttrace colab tests
       - name: Metrics unit tests
         run: python tests/test_metrics.py
+      - name: Hybrid feature and fold-safety tests
+        run: python tests/test_hybrid.py

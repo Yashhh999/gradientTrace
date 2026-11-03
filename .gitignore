@@ -15,3 +15,6 @@ data/*.jsonl
 
 # fitted hybrid artifacts (embeddings bank + fusion weights)
 hybrid_fusion/
+hybrid_gate_externalbank.npz
+hybrid_bank_cache.npz
+hybrid_gate_features.npz

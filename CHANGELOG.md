@@ -11,6 +11,28 @@ AGENTS.md, AGENTS.md is right and this one is stale.
 
 ## 2026-11-03
 
+- **External-bank re-test refutes the gate-fitted hybrid (2026-11-03).** `colab/hybrid_bank_eval.py`
+  refit the fusion on a 4,575-row bank drawn from the pilot's held-out slices (in-domain,
+  unseen-generator, humanized, held-out poetry; balanced by slice/label/domain), set the threshold
+  from that bank's out-of-fold scores, and scored the frozen gate as an unseen population. The
+  gate-fitted result (pooled AUROC 0.9876, TPR@1% 0.7688, FPR@0.5 0.0550, 9/20 frontier explainers
+  caught) came apart: every k-NN feature set fell below the bare detector on pooled AUROC
+  (`det + vectors` 0.9105, `hybrid all` 0.9136 vs detector 0.9323), reviews TPR@1% dropped
+  0.3650 -> 0.2125/0.2400, and explainer coverage returned to 1/20. Stylometry survived and
+  improved: `det + stylometry` reached pooled AUROC 0.9422, news AUROC 0.9480 / TPR@1% 0.8050 /
+  FPR@0.5 0.0825 (from 0.2475), reviews AUROC 0.9494 / TPR@1% 0.3700 / FPR@0.5 0.0450 (from
+  0.1375); at the bank-calibrated 0.8741 cut it caught 459/800 gate AI texts with 8 human false
+  alarms versus the detector's 471/800 at its own 1% point. Reading: embedding geometry is
+  bank-local, surface statistics are corpus-portable — the opposite of the prediction made before
+  running it. Shipped `SHIP_SET="det + stylometry"`, which needs no bank at inference.
+- **Hybrid feature work (2026-11-03).** Dropped the GPT-2 reference LM (pooled 0.9481 in-bank, 2/20
+  explainers, `bpb` ranking archaic prose as machine text) and replaced it with two signals derived
+  from the detector itself: 33 stylometric features and k-NN/centroid geometry over the pooled
+  `encode()` vector. Added `gradienttrace/hybrid.py`, `predict_probs_and_embeddings` (bit-identical
+  logit to `predict_probs`, asserted), fold-rebuilt vector features with pair-partner blocking
+  (asserted in `tests/test_hybrid.py`, now wired into CI), per-fold coefficient sign agreement, and
+  a bank-less `HybridScorer` path.
+
 - **Hybrid system (2026-11-03, `colab/hybrid_eval.py`):** fusing the detector logit with GPT-2
   surprisal features by out-of-fold logistic regression halves the human false-positive rate at
   equal detection (news FPR@0.5 0.2475 -> 0.1000, TPR@1% 0.7925 -> 0.7825; reviews TPR@1%

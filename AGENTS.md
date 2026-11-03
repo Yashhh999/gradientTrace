@@ -23,12 +23,15 @@ real runs, and the current state of the work. Update this file when behavior cha
   closed: every 150k build flags 60-71% of clean human news at 0.5 and the last probe
   (`v2_ailow10`, local AI 0.10 at 607 steps) shows why the knob is not the lever — it moved the
   human mean 0.616 -> 0.362 and FPR@0.5 0.600 -> 0.2825 but collapsed news TPR@1% 0.665 -> 0.2825.
-  The hybrid is now the open thread (`gradienttrace/hybrid.py`, §7.8): the detector's own logit
-  plus 33 stylometric features plus k-NN geometry in its pooled embedding, fused out-of-fold. On
-  the gate it lifts pooled AUROC 0.9323 -> 0.9876, TPR@1% 0.5887 -> 0.7688, FPR@0.5 0.1925 ->
-  0.0550, and frontier-explainer catches 1/20 -> 9/20 at each system's own 1% FPR point. Those are
-  upper bounds until the bank is rebuilt from held-out slices instead of the gate (§11), and the
-  encyclopedic register still needs training data — no scorer fixes it.
+  The hybrid is shipped but narrowed (`gradienttrace/hybrid.py`, §7.8-7.9): the detector logit plus
+  33 stylometric features, fused by out-of-fold logistic regression. Scored on the gate it looked
+  like AUROC 0.9876 with 9/20 frontier explainers caught, but that run used the gate as its own
+  k-NN bank. Re-tested with a bank drawn from the model's held-out slices (§7.9), the embedding
+  geometry collapsed below the bare detector (pooled AUROC 0.9105 vs 0.9323) and the explainer
+  catch rate returned to 1/20, while **stylometry held up**: pooled AUROC 0.9422, news TPR@1%
+  0.8050, and FPR@0.5 cut from 0.2475 to 0.0825 on news and 0.1375 to 0.0450 on reviews. The
+  shipped fusion is detector + stylometry, no bank. Frontier-explainer coverage is unchanged and
+  still needs training data in that register — no scorer fixes it.
 
 ---
 
@@ -686,24 +689,54 @@ threshold):
   Darwin, two Wikipedia leads) at 0.5: detector AI 4/6 + humans 4/8 flagged; hybrid AI 4/6 +
   **humans 2/8**.
 
-Readings:
+Readings (all of them superseded where they contradict the external-bank table below):
 
-- The embedding geometry is the workhorse; stylometry alone is barely better than the detector
-  (0.9378) and contributes sentence-shape and punctuation cues (`sent_mean_words -1.67`,
-  `hapax_rate +1.17`, `ellipsis_rate -0.96`). It is also the block a paraphrase attack defeats.
+- The embedding geometry dominates the gate-fitted fusion; stylometry alone is barely better than
+  the detector (0.9378) and contributes sentence-shape and punctuation cues (`sent_mean_words
+  -1.67`, `hapax_rate +1.17`, `ellipsis_rate -0.96`).
 - Superseded: the GPT-2 reference-LM fusion (pooled AUROC 0.9481, 2/20 explainers). Dropped
   because it calibrated without extending coverage and its `bpb` feature ranked archaic and
   encyclopedic prose as machine text (Declaration of Independence bpb 0.163 vs AI explainers
   0.89-1.27).
-- **The bank is the gate.** Out-of-fold stops per-row label leakage, but the human/AI clusters are
-  the evaluation set's own clusters, so the table above is an upper bound.
-  `colab/hybrid_bank_eval.py` re-runs the same fusion with a bank drawn from the pilot's held-out
-  slices (`test_indomain` + `test_ood_generators` + `test_humanized` + `test_heldout_domain`,
-  balanced to 8k rows by slice/label/domain) and scores the gate as a fully unseen population.
-  THAT is the acceptance number; until it lands, quote these as upper bounds.
-- Register confound survives the hybrid: Wikipedia's Great Barrier Reef lead still scores 0.9695
-  as AI, because the bank holds no human encyclopedic prose. No scorer fixes that — it is a data
-  gap (§11).
+
+### 7.9 The external-bank re-test (`colab/hybrid_bank_eval.py`)
+
+The table above fits and scores on the frozen gate, so its k-NN bank **is** the population being
+measured. Out-of-fold CV stops a row from seeing its own label and blocks pair partners, but the
+human/AI clusters are still the test set's own clusters. `hybrid_bank_eval.py` rebuilds the bank
+from the pilot's held-out slices (`test_indomain` + `test_ood_generators` + `test_humanized` +
+`test_heldout_domain`, 4,575 rows balanced by slice/label/domain), fits the fusion there, sets the
+threshold from the **bank's** out-of-fold scores, and then scores the gate as a population it has
+never seen.
+
+| feature set, gate as unseen population | pooled AUROC | pooled TPR@1% | pooled FPR@0.5 | news AUROC | news TPR@1% | news FPR@0.5 | reviews AUROC | reviews TPR@1% | reviews FPR@0.5 |
+|---|---|---|---|---|---|---|---|---|---|
+| detector | 0.9323 | 0.5887 | 0.1925 | 0.9487 | 0.7925 | 0.2475 | 0.9360 | 0.3650 | 0.1375 |
+| det + stylometry | **0.9422** | 0.5787 | **0.0638** | 0.9480 | **0.8050** | **0.0825** | **0.9494** | **0.3700** | **0.0450** |
+| det + vectors | 0.9105 | 0.5038 | 0.0775 | 0.9502 | 0.8125 | 0.1125 | 0.9060 | 0.2125 | 0.0425 |
+| hybrid all | 0.9136 | 0.5125 | 0.0950 | 0.9488 | 0.8050 | 0.1250 | 0.9091 | 0.2400 | 0.0650 |
+
+- **Stylometry transfers; embedding geometry does not.** `det + stylometry` beats the detector on
+  nearly every axis and halves-to-two-thirds the false accusations at 0.5 in both genres. Every
+  set containing k-NN features falls *below* the bare detector on pooled AUROC (0.9105 / 0.9136 vs
+  0.9323) and collapses reviews TPR@1% (0.3650 -> 0.2125). The +0.074 AUROC the geometry produced
+  in-bank was the fusion recognising the evaluation set's own clusters.
+- **The coverage claim was cluster memory too.** Under the external bank the fusion flags 0-1 of
+  the 20 frontier explainers at its bank-calibrated cut, the same as the detector's 1/20 — not the
+  9/20 measured in-bank.
+- **Shipped set: `det + stylometry`** (`SHIP_SET` in `colab/hybrid_eval.py`). It needs no
+  `bank.npz` at inference, so deployment is the detector plus a pure feature function;
+  `HybridScorer` notices the fusion has no vector columns and skips the bank entirely (asserted in
+  `tests/test_hybrid_inference.py`). At the bank-calibrated 0.8741 cut it catches 459/800 gate AI
+  texts with 8 human false alarms (exactly 1.0% FPR) versus the detector's 471/800: parity on
+  detection, two thirds fewer accusations, on a population it never saw.
+- Encyclopedic register still fails regardless of scorer: Wikipedia's Great Barrier Reef lead
+  scores 0.9695 as AI. That is a data gap (§11), and it is the reason the next real investment is
+  paired register coverage, not another fusion.
+
+Both runs cache what they load (`hybrid_bank_rows.json`, `hybrid_bank_cache.npz`,
+`hybrid_gate_cache.npz` — all gitignored), so re-scoring the fusion costs seconds; the ~19 minute
+data build is the only expensive step and it runs once.
 
 Using it: `save_fusion(OUT_DIR, fusion, embeddings, labels, groups, DET_ID, k)` writes
 `fusion.json` (feature order, standardizer, weights, threshold) plus `bank.npz` (embeddings,
@@ -794,7 +827,8 @@ state, ~4.4–5 GB per push).
 | news builder ends with one generator | a model architecture is unsupported by the installed transformers | read the printed load error; the cell falls back through `GEN_MODELS`; one generator is still usable, two are better |
 | news builder crashes with `probability tensor contains either inf, nan or element < 0` | a generator is numerically unstable in fp16 on the T4 (Granite-2B) | use SmolLM2 (current list); do not add fp16-unstable models |
 | news builder keeps only ~14% of generations | completions end below the 200-char loader minimum | read `[news] rejects:`; `min_new_tokens` now forces roughly the human length; if `preamble` dominates, strip the lead-in |
-| fusion AUROC jumps but only on the rows it was fit against | the k-NN bank is the evaluation set; out-of-fold blocks labels, not clusters | re-run with `colab/hybrid_bank_eval.py` (bank from held-out slices) before quoting it |
+| fusion AUROC jumps but only on the rows it was fit against | the k-NN bank is the evaluation set; out-of-fold blocks labels, not clusters | measured 2026-11-03 (§7.9): the gain does not survive. Re-run with `colab/hybrid_bank_eval.py` before quoting any fusion number |
+| k-NN fusion beats the gate-fitted baseline but loses to the bare detector on fresh data | embedding geometry is bank-local: nearest-neighbour distance only means something relative to the population in the bank | ship `det + stylometry`; treat vector features as diagnostic, not production |
 | a fusion feature has a negative coefficient on `det_logit` | the embedding geometry carries the signal and the logit acts as a corrector; sign agreement was 5/5 folds | check sign stability per fold (`hybrid_eval.py` prints it); do not "fix" the sign |
 | k-NN features look suspiciously strong | the gate is prompt-paired, so a row's nearest neighbour is its own AI/human partner — that is topic, not style | never compute vector features with group blocking disabled; `tests/test_hybrid.py` fails if it is |
 | hybrid fusion has better AUROC and FPR@0.5 but reviews TPR@1% collapses | `log_chars` in the feature set; the fusion learns the gate's length confound | keep length out of the feature set; never ship the all-features fusion |
@@ -814,18 +848,22 @@ gates, the four 150k gates, and each diagnosis — is in `CHANGELOG.md`.
 - **The 150k data-mix search is closed.** Four gates (5,265 / 1,755 / 607 steps at the v2 mix,
   then 607 steps with `local_jsonl.ai_foundational` 0.10) all fail: the step budget is not the
   variable, and the one weight that fixes clean-human calibration destroys the AI tail.
-- **Hybrid shipped in code** (`gradienttrace/hybrid.py`, `colab/hybrid_eval.py`): detector logit +
-  33 stylometric features + k-NN/centroid geometry in the detector's own pooled embedding, fused
-  by out-of-fold logistic regression. On the gate it reaches pooled AUROC 0.9876 / TPR@1% 0.7688 /
-  FPR@0.5 0.0550 and catches 9/20 frontier explainers at its own 1% FPR point (detector: 1/20).
-  The GPT-2 reference-LM variant is dropped: it calibrated but added no coverage. §7.8 has the
-  tables, the fold-safety rule and the outstanding bank caveat.
-- **Not yet verified:** whether the hybrid gain survives a bank drawn from the model's held-out
-  slices instead of the gate itself (`colab/hybrid_bank_eval.py`). Until that lands, treat the
-  hybrid numbers as an upper bound, not an acceptance result.
+- **Hybrid shipped, and re-tested honestly** (`gradienttrace/hybrid.py`, `colab/hybrid_eval.py`,
+  `colab/hybrid_bank_eval.py`): detector logit + 33 stylometric features + k-NN/centroid geometry
+  in the detector's own pooled embedding, fused by out-of-fold logistic regression. Gate-fitted it
+  claims pooled AUROC 0.9876 / TPR@1% 0.7688 and 9/20 frontier explainers — that run used the gate
+  as its own bank. Under a bank drawn from the pilot's held-out slices (§7.9) the k-NN sets fall
+  **below** the bare detector (pooled AUROC 0.9105 vs 0.9323, reviews TPR@1% 0.2125 vs 0.3650) and
+  explainers return to 1/20, while stylometry holds: pooled AUROC **0.9422**, news TPR@1%
+  **0.8050**, news FPR@0.5 **0.0825** (from 0.2475), reviews AUROC **0.9494** / FPR@0.5 **0.0450**.
+  **Shipped: `SHIP_SET="det + stylometry"`** — no bank needed at inference.
+- **Not yet done:** the fused model has never been through `colab/external_gate.py` as a deployed
+  detector (the §7.9 numbers come from re-scoring the frozen gate with the shipped features), and
+  `SHIP_SET` has not been validated on a second generator. Both precede any launch claim that
+  uses fusion numbers rather than the pilot's recorded gate row.
 - **Coverage gap that no scorer fixes:** encyclopedic/explainer register. Wikipedia's GBR lead
-  scores 0.9695 as AI under the hybrid. Fix is paired training data in that register, not a second
-  model.
+  scores 0.9695 as AI under every variant tried (detector, GPT-2 fusion, k-NN fusion). Fix is
+  paired training data in that register, not a second model.
 
 - **Root cause of the gate failure (found 2026-10-31):** `yaful/MAGE` labels 1 = human and
   0 = machine, while the generic `hf:` adapter assumes 1 = AI. `hf:yaful/MAGE` therefore fed

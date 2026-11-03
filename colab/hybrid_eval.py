@@ -27,6 +27,7 @@ PROBE_TXT = os.environ.get("PROBE_TXT", os.path.expanduser("~/texts20.txt"))  # 
 OUT_DIR = os.environ.get("OUT_DIR", "hybrid_fusion")  # fusion.json + bank.npz, loadable by HybridScorer
 K_NEIGHBOURS = 8
 BATCH = 16
+SHIP_SET = os.environ.get("SHIP_SET", "det + stylometry")  # the set that survived the external-bank test
 
 
 def repo_dir():
@@ -150,12 +151,13 @@ def main():
         ))
 
     tpr1, thr1 = operating(det_p, y, 0.01)
-    ship = "hybrid all"
-    _, ship_fusion = fits[ship]
-    ship_fusion.threshold = thr1
+    ship = SHIP_SET
+    ship_oof, ship_fusion = fits[ship]
+    _, ship_thr = operating(ship_oof, y, 0.01)
+    ship_fusion.threshold = ship_thr
     save_fusion(OUT_DIR, ship_fusion, embeddings, y, groups, DET_ID, K_NEIGHBOURS)
-    print("\n[saved] %s/fusion.json + bank.npz (%d bank rows) — detector 1%% FPR threshold %.4f"
-          % (OUT_DIR, len(y), thr1))
+    print("\n[saved] %s/fusion.json + bank.npz (%d bank rows) — ship set '%s'; gate 1%%-FPR cut: detector %.4f, fusion %.4f"
+          % (OUT_DIR, len(y), ship, thr1, ship_thr))
 
     if not rows:
         print("[hybrid] no PROBE_TXT; transfer stage skipped")
@@ -164,23 +166,21 @@ def main():
     print("\n=== transfer to %d texts outside the gate's registers ===" % len(rows))
     scorer = HybridScorer(det_dir, OUT_DIR, device=device, batch_size=BATCH, detector=(model, tok))
     probe_texts = [t for _, t in rows]
-    full, det_probe = scorer.features(probe_texts)
-    X_ship = full[:, [FEATURES.index(n) for n in ship_fusion.names]]
-    fused = ship_fusion.predict(X_ship)
-    gate_oof = fits[ship][0]
-    h_tpr1, h_thr1 = operating(gate_oof, y, 0.01)
-    knn_col = FEATURES.index("knn_margin")
-    marker_col = FEATURES.index("llm_marker_rate")
-    print("  operating points — detector TPR@1%% %.4f (thr %.4f) | hybrid TPR@1%% %.4f (thr %.4f)"
-          % (tpr1, thr1, h_tpr1, h_thr1))
-    print("  flagged above own 1%%-FPR threshold: detector %d/%d, hybrid %d/%d"
-          % (int((det_probe >= thr1).sum()), len(rows), int((fused >= h_thr1).sum()), len(rows)))
-    print("  flagged above 0.5: detector %d/%d, hybrid %d/%d"
+    full, det_probe, made = scorer.features(probe_texts)
+    fused = ship_fusion.predict(full[:, [made.index(n) for n in ship_fusion.names]])
+    marker_col = made.index("llm_marker_rate")
+    knn_col = made.index("knn_margin") if "knn_margin" in made else None
+    print("  operating points — detector TPR@1%% %.4f (thr %.4f) | ship fusion TPR@1%% %.4f (thr %.4f)"
+          % (tpr1, thr1, operating(ship_oof, y, 0.01)[0], ship_thr))
+    print("  flagged above own 1%%-FPR threshold: detector %d/%d, fusion %d/%d"
+          % (int((det_probe >= thr1).sum()), len(rows), int((fused >= ship_thr).sum()), len(rows)))
+    print("  flagged above 0.5: detector %d/%d, fusion %d/%d"
           % (int((det_probe >= 0.5).sum()), len(rows), int((fused >= 0.5).sum()), len(rows)))
-    print("  %-14s %6s %8s %8s %9s %9s" % ("text", "chars", "det_p", "hyb_p", "knn_marg", "llm_rate"))
+    head = "  %-14s %6s %8s %8s %9s" % ("text", "chars", "det_p", "hyb_p", "llm_rate")
+    print(head + ("" if knn_col is None else " %9s" % "knn_marg"))
     for i, (key, text) in enumerate(rows):
-        print("  %-14s %6d %8.4f %8.4f %9.4f %9.4f"
-              % (key, len(text), det_probe[i], fused[i], full[i, knn_col], full[i, marker_col]))
+        line = "  %-14s %6d %8.4f %8.4f %9.4f" % (key, len(text), det_probe[i], fused[i], full[i, marker_col])
+        print(line + ("" if knn_col is None else " %9.4f" % full[i, knn_col]))
 
 
 if __name__ == "__main__":

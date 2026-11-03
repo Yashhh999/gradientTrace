@@ -20,7 +20,9 @@ except ImportError:
     torch = None
 
 from gradienttrace.hybrid import (  # noqa: E402
+    DETECTOR_NAMES,
     FEATURES,
+    STYLO_NAMES,
     Fusion,
     HybridScorer,
     build_static,
@@ -129,8 +131,9 @@ def test_save_and_score_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         save_fusion(tmp, fusion, embeddings, labels, groups, "tiny-detector", k=4)
         scorer = HybridScorer("ignored", tmp, device=device, batch_size=6, detector=(model, tok))
-        full, probe_probs = scorer.features(gate[:5])
-        assert full.shape[0] == 5 and full.shape[1] == len(FEATURES), full.shape
+        full, probe_probs, made = scorer.features(gate[:5])
+        assert made == FEATURES, "a banked scorer must report the columns it built"
+        assert full.shape == (5, len(FEATURES)), full.shape
         X = full[:, columns_for(names)]
         with np.load(f"{tmp}/bank.npz") as loaded:
             assert loaded["embeddings"].shape == (24, 16) and loaded["labels"].sum() == 12
@@ -139,6 +142,18 @@ def test_save_and_score_roundtrip():
         assert again["threshold"] == 0.6
         assert np.isfinite(again["fused"]).all() and np.isfinite(probe_probs).all()
         assert Fusion.from_json(fusion.to_json()).names == names
+
+        # the shipped fusion has no vector columns, so it must work without touching the bank
+        bankless_names = ["det_logit", "log_words", "ttr"]
+        _, _, bankless, _ = oof_fusion(bankless_names, X_static, embeddings.astype(np.float64),
+                                       labels, groups, stratify(labels, genres))
+        bankless.threshold = 0.5
+        save_fusion(tmp, bankless, embeddings, labels, groups, "tiny-detector", k=4)
+        plain = HybridScorer("ignored", tmp, device=device, batch_size=6, detector=(model, tok))
+        full2, _, made2 = plain.features(gate[:5])
+        assert made2 == DETECTOR_NAMES + STYLO_NAMES, "vector block should be skipped without a bank"
+        assert full2.shape == (5, len(DETECTOR_NAMES) + len(STYLO_NAMES))
+        assert np.isfinite(plain.score(gate[:5])["fused"]).all()
 
 
 if __name__ == "__main__":

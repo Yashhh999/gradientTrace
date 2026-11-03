@@ -357,6 +357,8 @@ class HybridScorer:
             self.bank_embeddings = bank["embeddings"].astype(np.float64)
             self.bank_labels = bank["labels"].copy()
             self.bank_groups = bank["groups"].copy()
+        if not any(name in VECTOR_NAMES for name in self.fusion.names):
+            self.bank_embeddings = self.bank_labels = self.bank_groups = None
         if detector is not None:
             self.model, self.tokenizer = detector
         else:
@@ -374,28 +376,26 @@ class HybridScorer:
             self.model, self.tokenizer, samples, self.device, batch_size=self.batch_size, desc="hybrid"
         )
         p = np.clip(probs.astype(np.float64), 1e-6, 1 - 1e-6)
-        embeddings = np.vstack([self.bank_embeddings, vectors.astype(np.float64)])
-        labels = np.concatenate([self.bank_labels, np.ones(len(texts), dtype=np.int64)])
-        # Each incoming text is its own group: it may borrow neighbours from the bank but never
-        # from a row that shares its topic, and it is not its own neighbour.
-        groups = np.concatenate([self.bank_groups, np.arange(len(texts)) + int(self.bank_groups.max()) + 1])
-        full = np.column_stack(
-            [
-                np.log(p / (1 - p)),
-                stylometry_matrix(texts),
+        blocks = [np.log(p / (1 - p))[:, None], stylometry_matrix(texts)]
+        if self.bank_embeddings is not None:
+            embeddings = np.vstack([self.bank_embeddings, vectors.astype(np.float64)])
+            labels = np.concatenate([self.bank_labels, np.ones(len(texts), dtype=np.int64)])
+            # Each incoming text is its own group: it may borrow neighbours from the bank but never
+            # from a row that shares its topic, and it is not its own neighbour.
+            groups = np.concatenate([self.bank_groups, np.arange(len(texts)) + int(self.bank_groups.max()) + 1])
+            blocks.append(
                 vector_features(
                     embeddings, labels, groups,
                     query_idx=np.arange(len(self.bank_labels), len(self.bank_labels) + len(texts)),
                     ref_idx=np.arange(len(self.bank_labels)),
                     k=self.k,
-                ),
-            ]
-        )
-        return full, probs
+                )
+            )
+        made = DETECTOR_NAMES + STYLO_NAMES + (VECTOR_NAMES if self.bank_embeddings is not None else [])
+        return np.hstack(blocks), probs, made
 
     def score(self, texts) -> dict:
-        full, probs = self.features(texts)
-        X = full[:, columns_for(self.fusion.names)]
-        fused = self.fusion.predict(X)
+        full, probs, made = self.features(texts)
+        fused = self.fusion.predict(full[:, [made.index(n) for n in self.fusion.names]])
         threshold = self.fusion.threshold if self.fusion.threshold is not None else 0.5
         return {"fused": fused, "detector": probs, "threshold": float(threshold), "flagged": fused >= threshold}

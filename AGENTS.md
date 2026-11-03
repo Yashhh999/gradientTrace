@@ -746,6 +746,37 @@ shipped `det + stylometry` set the fusion has no vector columns, so `HybridScore
 `bank.npz` and then ignores it: the file is written but carries no weight at inference. Deleting
 it next to a deployed fusion changes nothing; keeping the pair matching is what matters.
 
+### 7.10 Public detector baselines (`colab/gate_baselines.py`)
+
+How the market compares, measured on our own gate rather than on vendor claims. Scores every
+publicly available checkpoint on `external_gate_v1` with the same metric the project is judged on,
+on CPU. Label conventions are never assumed: each checkpoint's `config.id2label` is read and
+printed, an override table covers checkpoints that ship generic `label_0/label_1` names (with the
+sibling-checkpoint evidence recorded inline), and anything still unresolved is scored in both
+directions because AUROC flips to 1-a under a wrong assignment.
+
+Recorded 2026-11-04, pooled TPR@1% FPR / news / reviews, with pooled AUROC:
+
+| detector | AUROC | TPR@1% | news | reviews |
+|---|---|---|---|---|
+| OpenAI roberta-large (2019) | 0.8220 | 0.0488 | 0.1400 | 0.0250 |
+| OpenAI roberta-base (2019) | 0.7891 | 0.0288 | 0.0500 | 0.0300 |
+| fakespot roberta-base | 0.8451 | 0.3200 | 0.3175 | 0.3950 |
+| tabularisai ModernBERT-base (RAID-trained) | 0.9386 | 0.3825 | **0.1800** | **0.6775** |
+| gradientTrace pilot | 0.9323 | 0.5887 | **0.7925** | 0.3650 |
+| shipped fusion (external bank) | **0.9422** | 0.5787 | **0.8050** | 0.3700 |
+
+- News is the clean comparison (no shared human source) and it is ours by ~4.5x on TPR@1%.
+- Reviews is lost to both tabularisai and fakespot. tabularisai trained on RAID, whose review
+  corpus is Yelp — the gate's own human reviews — so its 0.6775 is inflated by source overlap, the
+  same discount §7.5 applies to our reviews slice. Our weakness there is still real.
+- The 2019 OpenAI detector keeps a respectable AUROC (0.86 news) and collapses only in the low-FPR
+  tail (TPR@1% 0.05): the same pattern the 150k builds showed internally. AUROC is never the
+  operating metric.
+- The commercial leaders (Originality, Pangram, GPTZero, Copyleaks) are API-only and were **not**
+  tested; the open checkpoints above are proxies. An API key turns this into a real market test.
+
+
 ---
 
 ## 8. Metrics and how to report them

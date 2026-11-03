@@ -9,6 +9,28 @@ AGENTS.md, AGENTS.md is right and this one is stale.
 
 ---
 
+## 2026-11-04
+
+- **Public detector baselines on our frozen gate (2026-11-04).** `colab/gate_baselines.py` scores
+  publicly available checkpoints on `external_gate_v1` with our metric. Each checkpoint's label
+  convention is read from its own `config.id2label` (OpenAI's is `0=fake, 1=real` — the opposite of
+  this repo's `1 = AI`), and checkpoints shipping generic labels are scored in both directions with
+  the AI class identified by which orientation gives AUROC > 0.5. Results (pooled / news / reviews,
+  TPR at a human-calibrated 1% FPR): OpenAI roberta-large 0.0488 / 0.1400 / 0.0250 (AUROC 0.8220);
+  OpenAI roberta-base 0.0288 / 0.0500 / 0.0300 (0.7891); fakespot roberta-base 0.3200 / 0.3175 /
+  0.3950 (0.8451); `tabularisai/ai-text-detection` (ModernBERT-base, RAID+6 corpora) 0.3825 /
+  0.1800 / 0.6775 (AUROC 0.9386); gradientTrace pilot 0.5887 / 0.7925 / 0.3650 (0.9323); shipped
+  fusion 0.5787 / 0.8050 / 0.3700 (0.9422). `shunya510hi/gpt4-text-detector` is unusable (0.5161).
+  Reading: news — where neither side shares the gate's human source — is ours by 4.5x on TPR@1%.
+  Reviews is lost to tabularisai (0.6775) and also to fakespot (0.3950); tabularisai trained on
+  RAID, whose review corpus is Yelp, i.e. the gate's own human reviews, so its number is inflated —
+  but our reviews weakness is independently real. tabularisai claims RAID TPR@1% 0.9306 and manages
+  0.3825 here, so our gate is harder than RAID for it (RAID's AI side includes easier/older
+  generators). Conclusion recorded: further scorer/fusion work has a low measured ceiling; the
+  remaining levers are review-domain and register diversity in training data, a second backbone
+  A/B, and a gate built on a second generator.
+
+
 ## 2026-11-03
 
 - **External-bank re-test refutes the gate-fitted hybrid (2026-11-03).** `colab/hybrid_bank_eval.py`

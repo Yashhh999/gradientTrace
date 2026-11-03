@@ -741,7 +741,10 @@ data build is the only expensive step and it runs once.
 Using it: `save_fusion(OUT_DIR, fusion, embeddings, labels, groups, DET_ID, k)` writes
 `fusion.json` (feature order, standardizer, weights, threshold) plus `bank.npz` (embeddings,
 labels, groups); `HybridScorer(detector_dir, fusion_dir).score(texts)` returns `fused`,
-`detector`, `threshold` and `flagged`. Both files are artifacts — never commit them.
+`detector`, `threshold` and `flagged`. Both files are artifacts — never commit them. For the
+shipped `det + stylometry` set the fusion has no vector columns, so `HybridScorer` loads
+`bank.npz` and then ignores it: the file is written but carries no weight at inference. Deleting
+it next to a deployed fusion changes nothing; keeping the pair matching is what matters.
 
 ---
 

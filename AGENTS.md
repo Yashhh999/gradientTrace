@@ -18,14 +18,14 @@ real runs, and the current state of the work. Update this file when behavior cha
   on every internal slice because the slices are source-confounded (domain equals label).
   A probe showed it flags ordinary human news/reviews as AI ~95–99% of the time.
   The only acceptance signal is the external gate (`colab/external_gate.py`).
-- **Current phase (2026-11-02):** the clean-news corpus moved the gate from chance to real news
-  separation, and the ailow pilot clears the bar: news AUROC 0.9487, TPR@1% FPR 0.7925,
-  FPR@0.5 0.2475, human mean 0.2623, AI mean 0.9196. The only change after longhuman2 was
-  cutting local AI 0.4 -> 0.25 with the human weight back at 0.5 — weakening the
-  journalist-prompt/short-AI contrast, not adding humans, fixed the clean-human spill (0.4273
-  -> 0.2623 with identical human data). Reviews 0.9360 / 0.3650 / 0.1375 (Yelp-seen) is the one
-  soft spot. The 150k is unblocked once the local human corpus is topped up to the full-run
-  20,000-row quota (`N_EXTRA_HUMANS` 16,000).
+- **Current phase (2026-11-03):** the ailow 50k pilot is the release model: news AUROC 0.9487,
+  TPR@1% FPR 0.7925, FPR@0.5 0.2475, human mean 0.2623, AI mean 0.9196. The 150k search is
+  closed: every 150k build flags 60-71% of clean human news at 0.5 and the last probe
+  (`v2_ailow10`, local AI 0.10 at 607 steps) shows why the knob is not the lever — it moved the
+  human mean 0.616 -> 0.362 and FPR@0.5 0.600 -> 0.2825 but collapsed news TPR@1% 0.665 -> 0.2825.
+  The hybrid (`colab/hybrid_eval.py`, detector + GPT-2 reference LM, fused by out-of-fold
+  logistic regression) halves the human false-positive rate at equal detection but adds no
+  coverage on frontier explainers. Remaining gap is register coverage, not calibration.
 
 ---
 
@@ -99,6 +99,7 @@ colab/
   one_shot_kaggle.py  Kaggle 2x T4 cell (CONFIG knob, RAID download, Hub preflight)
   external_gate.py    external acceptance gate (frozen matched human/AI dataset)
   finish_eval.py      resumable full slice evaluation on a single GPU
+  hybrid_eval.py      detector + reference-LM fusion, scored on the frozen gate by oof CV
   build_raid.py       one-time RAID byte-range extractor -> Hub v2/raid_v2.jsonl
   build_news.py       paired clean-news builder -> Hub v2/news_pairs.jsonl (v2 local.jsonl)
 data/example_local.jsonl  schema example for prompt-paired `local.jsonl`
@@ -299,6 +300,11 @@ All configs share the model/schedule; only data and Hub targets differ.
 | Hub repo | `Yashhh999/gradientTrace` | `…-v2` | `…-v2-pilot` |
 | early stopping | patience 0 | 0 | 0 |
 | length match | — | false | false |
+
+`configs/v2_ailow10.yaml` is v2 with `local_jsonl.ai_foundational` 0.25 -> 0.10 only, run at the
+pilot's 607-step budget to test whether per-batch exposure to the journalist-prompt/short-AI
+contrast causes the 150k human-calibration regression. It does partly, and the config is
+archived as that experiment's record (see 7.5).
 
 `early_stopping_patience: 0` is deliberate: with step-based evaluation, every eval is a
 patience tick, and v1 early-stopped at step 5,607 (~1 epoch) when val AUROC saturated. Keeping
@@ -507,6 +513,19 @@ Internal val 0.9961 / 0.948, in-domain 0.9959 / 0.909, OOD 0.9990 / 0.982, human
 0.991, poetry 0.9624 / 0.538. **Clears the pilot bar.** The 150k needs the local human corpus at
 its 20,000-row quota (16,000 cc + 4,000 CNN) or the local share halves to 1/6 of the human bucket.
 
+150k gates (`..._report_v2-full.json`, `_v2-1ep.json`, `_v2-150k607.json`, `_v2-ailow10.json`,
+2026-11-02/03): **none clears the bar, and the failure is calibration, not ranking.** News
+AUROC stays 0.93-0.95 while the human mean sits at 0.62-0.68 (FPR@0.5 0.60-0.71) for the three
+v2-recipe builds at 5,265 / 1,755 / 607 steps — the step budget is not the variable. The fourth
+build cut `local_jsonl.ai_foundational` to 0.10 at the same 607 steps: news 0.9176 / 0.2825 /
+0.2825 (human mean 0.616 -> 0.362, AI mean 0.9639 -> 0.9082), reviews 0.9560 / 0.5450 / 0.3300,
+pooled 0.9371 / 0.4612 / 0.3063. So the local news-AI share *is* the knob that spills onto clean
+humans (FPR@0.5 0.600 -> 0.2825, under the 0.36 bar) and the human side recovers, but the AI tail
+loses separation with it (TPR@1% 0.665 -> 0.2825 against a 0.60 bar). Data volume, not steps,
+moved the whole 150k human distribution up; the 50k pilot remains the release model and the 150k
+data-mix search is closed. Internal slices for ailow10: val 0.9948 / 0.907, in-domain 0.9949,
+OOD 0.9993 / 0.990, humanized 0.9975 / 0.951, poetry 0.9507 / 0.435.
+
 Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp, so the
 reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
 human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
@@ -602,6 +621,51 @@ and trimmed at a sentence boundary).
   them idempotently. The dataset is then frozen and reused by later runs. **A rebuilt news
   file is a data change: set `RESUME=False`.**
 
+### 7.8 Hybrid eval (`colab/hybrid_eval.py`)
+
+Second-opinion detector: fuses the DeBERTa logit with a small reference LM's surprisal profile
+and scores the fusion on the frozen gate with **5-fold out-of-fold CV** (stratified by
+label x genre), so no row is judged by weights that saw it. Knobs at the top: `DET_ID`, `REF_ID`
+(must be unseen in training; GPT-2 124M is the default), `GATE_REPO/GATE_NAME`, `PROBE_TXT`
+(explainer blocks `**N. Title`, scored as a transfer set; `""` skips it).
+
+Features: `det_logit`, reference `bpb` (nats over UTF-8 bytes of the scored tokens),
+`nll_std`, `burst` (std of 8-token window-mean surprisal), `tail` (mean of the top-20% surprisal
+tokens minus the mean), `log_chars`. Logistic regression on standardized features; the fusion
+is refit on the whole gate for the transfer stage, and each system is compared **at its own
+FPR-calibrated operating point**, because the fused score is not calibrated to 0.5.
+
+Recorded (ailow pilot as detector, reference = GPT-2 124M, 2026-11-03; the detector row
+reproduces `external_gate_v1_report_v2-pilot-ailow.json` exactly, which validates the harness):
+
+| feature set | pooled AUROC | pooled TPR@1% | pooled FPR@0.5 | news AUROC | news TPR@1% | news FPR@0.5 | reviews TPR@1% |
+|---|---|---|---|---|---|---|---|
+| detector only | 0.9323 | 0.5887 | 0.1925 | 0.9487 | 0.7925 | 0.2475 | 0.3650 |
+| reference only | 0.8936 | 0.2075 | 0.1900 | 0.9226 | 0.6075 | 0.1975 | 0.0675 |
+| det + bpb | 0.9324 | 0.5675 | 0.1550 | 0.9476 | 0.7900 | 0.2025 | 0.3625 |
+| all incl. length | 0.9581 | 0.4150 | 0.1125 | 0.9695 | 0.7450 | 0.1225 | 0.1050 |
+| all except length | 0.9481 | 0.5813 | 0.1163 | 0.9617 | 0.7825 | 0.1000 | 0.4025 |
+
+Readings:
+
+- A 124M 2019 GPT-2 reaches news AUROC 0.9226 on the gate by itself — the gate's Qwen news is
+  that predictable, so the reference LM is a genuinely semi-independent signal, not a decoy.
+- `bpb` alone adds nothing next to the detector (its coefficient shrinks to -0.10); the spread
+  features are what carry information (`nll_std +0.96`, `burst -0.90`, `tail -1.03`).
+- **`log_chars` must stay out.** With it, AUROC/FPR look best but the low-FPR tail collapses on
+  reviews (TPR@1% 0.3650 -> 0.1050): the fusion learns "long = human", which is the gate's own
+  length confound, not a property of machine text.
+- Without length the fusion is a real calibration win at equal detection: news FPR@0.5 0.2475
+  -> 0.1000 with TPR@1% 0.7925 -> 0.7825, and reviews TPR@1% 0.3650 -> 0.4025 (past the 0.40
+  watch line). `REF_ID=openai-community/gpt2-large` gives the same picture (no-length pooled
+  0.9484, news 0.9632/0.7525), so the gain is not a GPT-2-small artifact; the 124M model is
+  cheaper and slightly better on TPR.
+- It does **not** extend coverage. On the 20 frontier explainers each system flags 1/20
+  (detector, thr 0.9872) vs 2/20 (no-length hybrid, thr 0.9082) at its own 1% FPR point. The
+  reference features track register, not authorship: the Declaration of Independence scores
+  bpb 0.163 and Wikipedia 0.70-0.75, lower (more "predictable") than the AI explainers at
+  0.89-1.27, so surprisal reads archaic/encyclopedic prose as machine text.
+
 ---
 
 ## 8. Metrics and how to report them
@@ -632,9 +696,12 @@ step-time spikes at checkpoint saves.
 
 | repo | contents |
 |---|---|
-| `Yashhh999/gradientTrace` | v1 model at root + `checkpoint-5607/`, `last-checkpoint/`, `eval_report.json`, `data_manifest.json`, README, `external_gate_v1.jsonl`, `external_gate_v1_meta.json`, `external_gate_v1_report_v1.json`, `external_gate_v1_report_v2-pilot.json`, `external_gate_v1_report_v2-pilot-fix.json`, `v2/raid_v2.jsonl`, `v2/raid_v2_meta.json`, `v2/news_pairs.jsonl`, `v2/news_pairs_meta.json` |
-| `Yashhh999/gradientTrace-v2` | target for the full v2 run |
-| `Yashhh999/gradientTrace-v2-pilot` | target for the 50k pilot |
+| `Yashhh999/gradientTrace` | v1 model at root + `checkpoint-5607/`, `last-checkpoint/`, `eval_report.json`, `data_manifest.json`, README, `external_gate_v1.jsonl`, `external_gate_v1_meta.json`, every gate report (`_v1`, `_v2-pilot`, `_v2-pilot-fix`, `_v2-pilot-news`, `_v2-pilot-ccnews`, `_v2-pilot-short`, `_v2-pilot-short2`, `_v2-pilot-longhuman`, `_v2-pilot-longhuman2`, `_v2-pilot-ailow`, `_v2-full`, `_v2-1ep`, `_v2-150k607`, `_v2-ailow10`), `v2/raid_v2.jsonl`, `v2/raid_v2_meta.json`, `v2/news_pairs.jsonl`, `v2/news_pairs_meta.json` |
+| `Yashhh999/gradientTrace-v2` | 150k / 3 epochs (5,265 steps) — fails the gate |
+| `Yashhh999/gradientTrace-v2-1ep` | 150k / 1 epoch (1,755 steps) — fails the gate |
+| `Yashhh999/gradientTrace-v2-150k607` | 150k at the pilot's 607 steps — fails the gate |
+| `Yashhh999/gradientTrace-v2-ailow10` | 150k / 607 steps with `local_jsonl.ai_foundational` 0.10 — clears FPR@0.5, fails TPR@1% |
+| `Yashhh999/gradientTrace-v2-pilot` | **the release model** (ailow: 50k / 607 steps) |
 | `Yashhh999/gradientTrace-smoke` | smoke pushes only |
 
 `Yashhh999/gradientTrace` and `-v2-pilot` are public (checked 2026-11-01); `-v2` is private
@@ -678,10 +745,12 @@ state, ~4.4–5 GB per push).
 | news builder ends with one generator | a model architecture is unsupported by the installed transformers | read the printed load error; the cell falls back through `GEN_MODELS`; one generator is still usable, two are better |
 | news builder crashes with `probability tensor contains either inf, nan or element < 0` | a generator is numerically unstable in fp16 on the T4 (Granite-2B) | use SmolLM2 (current list); do not add fp16-unstable models |
 | news builder keeps only ~14% of generations | completions end below the 200-char loader minimum | read `[news] rejects:`; `min_new_tokens` now forces roughly the human length; if `preamble` dominates, strip the lead-in |
+| hybrid fusion has better AUROC and FPR@0.5 but reviews TPR@1% collapses | `log_chars` in the feature set; the fusion learns the gate's length confound | run `hybrid no-length`; never ship the all-features fusion |
+| every 150k build flags 60-71% of gate humans at 0.5 while the 50k pilot flags 24.75% | data volume, not steps: 607 / 1,755 / 5,265 steps all land at human mean 0.62-0.68 | the pilot is the release model; the only lever that moved it was `local_jsonl.ai_foundational`, and it trades the AI tail away to get it |
 
 ---
 
-## 11. Current status (2026-11-02)
+## 11. Current status (2026-11-03)
 
 - **Root cause of the gate failure (found 2026-10-31):** `yaful/MAGE` labels 1 = human and
   0 = machine, while the generic `hf:` adapter assumes 1 = AI. `hf:yaful/MAGE` therefore fed
@@ -828,17 +897,29 @@ state, ~4.4–5 GB per push).
   AUROC +0.016. Reviews TPR@1% 0.365 is below the ~0.40 watch line but Yelp is source-seen.
   Internal val 0.9961 / 0.948, in-domain 0.9959 / 0.909, OOD 0.9990 / 0.982, humanized 0.9998 /
   0.991, poetry 0.9624 / 0.538.
-- **Full-run prerequisites (implemented 2026-11-02, not yet run):** `N_EXTRA_HUMANS` 6,000 ->
-  16,000 so the corpus holds 20,000 long humans (4,000 CNN + 16,000 cc), the 150k local human
-  quota. Rerun `build_news.py` (`REGENERATE=False`): it restores the 10,000 human / 15,002 AI
-  file and appends 10,000 cc rows, no generation (~20–30 min). Keep arena's frontier weight at
-  0.4: its 18,064-row pool plus RAID 2,381 gives the same ~68% of the 30k frontier target as
-  the validated pilot. Then the full run: `CONFIG="v2"`, `RESUME=False`, `SAVE_EVERY=1000`,
-  3 epochs, ~7,031 steps (~15 h across two 2×T4 sessions), gate as `v2-full` with
-  `MODEL_ID="Yashhh999/gradientTrace-v2"`.
 - **Full-run bar:** hold news FPR@0.5 <=0.36, TPR@1% >=0.6, AI mean >=0.9, reviews TPR@1%
   >=0.30. If the bigger run regresses the human side, the next lever is not more clean humans
   (longhuman2) but the local AI weight and the short-variant cap.
+- **150k run and gates (2026-11-02/03, done):** the corpus top-up, the 5,265-step v2 run, a
+  1,755-step run and a 607-step run all shipped and all failed the same way — news AUROC
+  0.935-0.953 with human mean P(AI) 0.62-0.68 and FPR@0.5 0.60-0.71, versus the pilot's 0.2623
+  / 0.2475 at the identical 607-step budget. Steps are not the variable.
+- **Ailow10 experiment (2026-11-03):** `configs/v2_ailow10.yaml` cut `local_jsonl.ai_foundational`
+  to 0.10 at 607 steps on the 150k pool (local pool 20,000 human / 9,064 AI). Gate: news 0.9176 /
+  0.2825 / 0.2825 (human mean 0.3622, AI mean 0.9082), reviews 0.9560 / 0.5450 / 0.3300, pooled
+  0.9371 / 0.4612 / 0.3063. The local-AI share does drive the clean-human spill and FPR@0.5 now
+  clears 0.36, but news TPR@1% falls to 0.2825 against a 0.60 bar, so it fails the bar too.
+  **The 150k data-mix search is closed; `Yashhh999/gradientTrace-v2-pilot` (ailow) is the release
+  model.** Internal slices are unchanged in kind (val 0.9948, OOD 0.9993, poetry 0.9507).
+- **Hybrid system (2026-11-03, `colab/hybrid_eval.py`):** fusing the detector logit with GPT-2
+  surprisal features by out-of-fold logistic regression halves the human false-positive rate at
+  equal detection (news FPR@0.5 0.2475 -> 0.1000, TPR@1% 0.7925 -> 0.7825; reviews TPR@1%
+  0.3650 -> 0.4025; pooled AUROC 0.9323 -> 0.9481) and the reference LM alone reaches news AUROC
+  0.9226, so the second signal is real. `log_chars` must stay out of the feature set. It does not
+  buy coverage: on 20 frontier explainers the detector flags 1/20 and the hybrid 2/20 at each
+  system's own 1% FPR point, because surprisal measures stylistic familiarity (Declaration of
+  Independence bpb 0.163, Wikipedia 0.70-0.75, AI explainers 0.89-1.27). Coverage now needs
+  training data in the encyclopedic/explainer register, not a second scorer. Details in 7.8.
 - Do **not** retrain on the v1 mix, and do not resume the v1 checkpoint into v2 (different data).
 
 ---

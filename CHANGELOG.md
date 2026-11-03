@@ -11,6 +11,24 @@ AGENTS.md, AGENTS.md is right and this one is stale.
 
 ## 2026-11-04
 
+- **Routing, abstention, pruning, temperature: measured out-of-bank (2026-11-04).**
+  `colab/hybrid_routing.py` runs entirely from the bank/gate caches and reports three things. A
+  cost-weighted policy (false accusation = 10, miss = 1) learned on the bank rows where the systems'
+  costs differ improves news to TPR@1% 0.8225 (fusion 0.8025, detector 0.7925) and the human FPR to
+  0.0013 (fusion 0.0100, detector 0.0063) — but it is trained on only 99 informative bank rows, so
+  the effect is small and the abstention counts are the substantive finding: abstaining on the
+  46/1,600 gate rows where detector and fusion disagree (39 AI, 7 human) leaves both systems at
+  425/761 AI caught with 3/793 false accusations on the scored rows. The off-register probe shows
+  the fusion *suppressing* explainer scores (ai-explainer 0.0411 -> 0.0034, product copy 0.5255 ->
+  0.0649) while Wikipedia's GBR lead stays at 0.9357, above the 0.8730 operating cut and still
+  flagged; coverage is not improved by any of this. Pruning is a small consistent win:
+  `log_words`, `sent_mean_words` and `llm_marker_rate` each reduce the result when removed
+  (full AUROC 0.9414 / 458 caught; without all three 0.9421 / 464), so they are queued for removal
+  from STYLO_NAMES but the effect is below the bank's noise floor. Temperature scaling fitted on
+  the bank's out-of-fold logit gave T=1.7352 and changed FPR@0.5 from 0.1925 to 0.1925 — a measured
+  no-op, because a monotone transform cannot change AUROC or a threshold that is calibrated on the
+  same data. Chunked re-embeddings moved §7.9 by at most 0.002.
+
 - **Public detector baselines on our frozen gate (2026-11-04).** `colab/gate_baselines.py` scores
   publicly available checkpoints on `external_gate_v1` with our metric. Each checkpoint's label
   convention is read from its own `config.id2label` (OpenAI's is `0=fake, 1=real` — the opposite of
@@ -31,7 +49,6 @@ AGENTS.md, AGENTS.md is right and this one is stale.
   A/B, and a gate built on a second generator.
 
 
-## 2026-11-04
 
 - **Truncation audit and chunked scoring (2026-11-04).** Tokenising the frozen gate with the
   release tokenizer shows only 23 of 1,600 rows exceed 512 tokens (all human Yelp reviews; max

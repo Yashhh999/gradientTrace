@@ -746,6 +746,28 @@ Both runs cache what they load (`hybrid_bank_rows.json`, `hybrid_bank_cache.npz`
 `hybrid_gate_cache.npz` — all gitignored), so re-scoring the fusion costs seconds; the ~19 minute
 data build is the only expensive step and it runs once.
 
+Routing, pruning and temperature (`colab/hybrid_routing.py`), all out-of-bank and cheap enough
+to run on the caches:
+
+- **Routing helps a little and abstention helps more.** A policy trained on the 99 bank rows where
+  the systems' costs differ (false accusation = 10, miss = 1) improves news TPR@1% to 0.8225
+  (fusion 0.8025, detector 0.7925) and the human FPR to 0.0013 (fusion 0.0100, detector 0.0063) —
+  but it is trained on 99 rows, so treat it as a small effect, not a shipped policy change.
+  Abstaining on the 46/1,600 gate rows where detector and fusion disagree (39 AI, 7 human) leaves
+  both systems at 425/761 AI caught with 3/793 false accusations on the scored rows. Abstention is
+  the cheapest partial answer to "a famous human text scored 0.9695".
+- **Pruning is a small consistent win, below the noise floor.** Dropping `log_words`,
+  `sent_mean_words` and `llm_marker_rate` raises AUROC 0.9414 -> 0.9421 and catches 458 -> 464 of
+  800 AI texts at the bank-calibrated cut; each alone helps. They are queued for removal from
+  `STYLO_NAMES` but the effect is tiny, and `llm_marker_rate` was already dead (fired on 2/20
+  frontier texts).
+- **Temperature scaling is a measured no-op.** Fitted on the bank's out-of-fold logit it gives
+  T=1.7352 and leaves FPR@0.5 at 0.1925 and AUROC unchanged — a monotone transform cannot change
+  either, so it stays out of the shipped path.
+- The fusion also *suppresses* explainer scores out-of-bank (ai-explainer 0.0411 -> 0.0034, product
+  copy 0.5255 -> 0.0649) while GBR Wikipedia stays at 0.9357, above the 0.8730 operating cut.
+  Coverage is not improved by the router or by abstention's fallback.
+
 Using it: `save_fusion(OUT_DIR, fusion, embeddings, labels, groups, DET_ID, k)` writes
 `fusion.json` (feature order, standardizer, weights, threshold) plus `bank.npz` (embeddings,
 labels, groups); `HybridScorer(detector_dir, fusion_dir).score(texts)` returns `fused`,
@@ -875,6 +897,8 @@ state, ~4.4–5 GB per push).
 | k-NN features look suspiciously strong | the gate is prompt-paired, so a row's nearest neighbour is its own AI/human partner — that is topic, not style | never compute vector features with group blocking disabled; `tests/test_hybrid.py` fails if it is |
 | hybrid fusion has better AUROC and FPR@0.5 but reviews TPR@1% collapses | `log_chars` in the feature set; the fusion learns the gate's length confound | keep length out of the feature set; never ship the all-features fusion |
 | a scoring change makes earlier results look wrong | embedding/score caches are pre-change and were never invalidated | compare against the run's own cache timestamp, then delete stale caches (naming them `*.stale.*`) and rebuild |
+| a router or policy looks useful on the gate but only moved 99 of 4,575 bank rows | the informative rows are those where the systems disagree; a cost model trained on ties learns the prior, not a rule | report the support count beside any policy gain; below ~100 informative rows, treat it as a small effect |
+| temperature scaling is proposed to fix calibration | it is monotone, so AUROC and any threshold calibrated on the same data cannot change | measure T on out-of-fold data; expect FPR@0.5 to move only if the threshold moves |
 | every 150k build flags 60-71% of gate humans at 0.5 while the 50k pilot flags 24.75% | data volume, not steps: 607 / 1,755 / 5,265 steps all land at human mean 0.62-0.68 | the pilot is the release model; the only lever that moved it was `local_jsonl.ai_foundational`, and it trades the AI tail away to get it |
 
 ---
@@ -911,8 +935,9 @@ gates, the four 150k gates, and each diagnosis — is in `CHANGELOG.md`.
   truncation could not be detected there, but `predict_probs_and_embeddings` now scores long
   texts in windows (mean chunk logit, token-weighted mean pooled vector) — any embedding cache
   built before the change is pre-chunk. See §7.8.
-- **Open harness items:** per-register routing and an abstain band, pruning the confounded/dead
-  stylometry features, mean-vs-CLS pooling for k-NN, temperature scaling, and a paraphrase
+- **Open harness items:** removing the three mildly harmful stylometry features, the
+  abstain-on-disagreement flag as a product behaviour, mean-vs-CLS pooling for k-NN (deferred —
+  the shipped fusion has no vector columns, so there is no consumer for it), and a paraphrase
   slice for the gate. None needs a pod except the paraphrase one. See CHANGELOG 2026-11-04.
 
 - **Root cause of the gate failure (found 2026-10-31):** `yaful/MAGE` labels 1 = human and

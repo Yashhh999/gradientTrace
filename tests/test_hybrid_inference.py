@@ -37,21 +37,36 @@ class TinyTokenizer:
     """Stand-in for the fast tokenizer: whitespace-split ids, dynamic padding."""
 
     vocab = 200
+    bos_token_id = 101
+    eos_token_id = 102
 
-    def __call__(self, texts, truncation=True, max_length=64, padding=True, return_tensors="pt"):
+    def _ids(self, text, truncation, max_length):
+        ids = [(sum(ord(ch) for ch in w) % (self.vocab - 3)) + 3 for w in text.split()]
+        return ids[: max(0, max_length - 2)] if truncation else ids
+
+    def __call__(self, texts, truncation=True, max_length=64, padding=True, return_tensors="pt", add_special_tokens=True):
         if isinstance(texts, str):
             texts = [texts]
-        rows = [
-            [(sum(ord(ch) for ch in w) % (self.vocab - 3)) + 3 for w in t.split()[: max_length - 2]]
-            for t in texts
-        ]
-        rows = [[1] + r + [2] for r in rows]
+        rows = []
+        for t in texts:
+            ids = self._ids(t, truncation, max_length)
+            rows.append([self.bos_token_id, *ids, self.eos_token_id] if add_special_tokens else ids)
+        if return_tensors is None:
+            return {"input_ids": rows, "attention_mask": [[1] * len(r) for r in rows]}
         width = max(len(r) for r in rows)
-        ids, mask = [], []
-        for r in rows:
-            ids.append(r + [0] * (width - len(r)))
-            mask.append([1] * len(r) + [0] * (width - len(r)))
-        return {"input_ids": torch.tensor(ids), "attention_mask": torch.tensor(mask)}
+        return {
+            "input_ids": torch.tensor([r + [0] * (width - len(r)) for r in rows]),
+            "attention_mask": torch.tensor([[1] * len(r) + [0] * (width - len(r)) for r in rows]),
+        }
+
+    def pad(self, example, padding=True, return_tensors="pt"):
+        rows = list(example["input_ids"])
+        self.seen = getattr(self, "seen", 0) + sum(len(r) for r in rows)
+        width = max(len(r) for r in rows)
+        return {
+            "input_ids": torch.tensor([r + [0] * (width - len(r)) for r in rows]),
+            "attention_mask": torch.tensor([[1] * len(r) + [0] * (width - len(r)) for r in rows]),
+        }
 
 
 def tiny_detector(pooling="cls"):
@@ -73,6 +88,49 @@ def tiny_detector(pooling="cls"):
 
 def texts(n=24):
     return ["The %s river ran quickly, so we walked home and talked." % (i % 5) for i in range(n)]
+
+
+def test_chunked_scoring_uses_the_tail():
+    if torch is None:
+        print("skip: torch not installed")
+        return
+    from gradienttrace.data import Sample
+    from gradienttrace.evaluate import predict_probs, predict_probs_and_embeddings
+
+    model, tok = tiny_detector()
+    device = torch.device("cpu")
+    head = "The quick brown fox jumps over the lazy dog"
+    tail = ("and the glacier melted slowly into the sea where the ships waited patiently "
+            "for the tide to change its mind")
+    samples = [Sample(text=head, label=0, generator="x", source="test"),
+               Sample(text=head + " " + tail, label=1, generator="x", source="test")]
+    tok.seen = 0
+    probs, vectors = predict_probs_and_embeddings(model, tok, samples, device, max_length=24, batch_size=2)
+    chunked_tokens = tok.seen
+    tok.seen = 0
+    unchunked, _ = predict_probs_and_embeddings(
+        model, tok, samples, device, max_length=24, batch_size=2, chunk=False
+    )
+    window_tokens = tok.seen
+    assert probs.shape == (2,) and vectors.shape == (2, 16)
+    assert np.isfinite(probs).all()
+    # a short text goes through one window, identical to the truncated path
+    assert abs(probs[0] - predict_probs(model, tok, [samples[0]], device, max_length=24, batch_size=1)[0]) < 1e-5
+    # chunk=False must reproduce truncation exactly
+    unchunked, _ = predict_probs_and_embeddings(
+        model, tok, samples, device, max_length=24, batch_size=2, chunk=False
+    )
+    assert abs(unchunked[1] - predict_probs(model, tok, [samples[1]], device, max_length=24, batch_size=1)[0]) < 1e-5
+    # and chunking must actually forward tokens from the tail, which the window count proves
+    # without depending on how discriminative a randomly-initialised model happens to be
+    lens = [len(tok(s.text, truncation=False)["input_ids"][0]) for s in samples]
+    full_tokens = sum(l - 2 for l in lens)
+    window = 24 - int(tok.bos_token_id is not None) - int(tok.eos_token_id is not None)
+    content = [l - 2 for l in lens]
+    windows = sum(max(1, -(-c // window)) for c in content)
+    assert full_tokens > window, "test text must exceed one window for this assertion to mean anything"
+    assert chunked_tokens > window_tokens, "chunking must forward the tail; truncation must stop at one window"
+    assert chunked_tokens == full_tokens + 2 * windows, (chunked_tokens, full_tokens, windows)
 
 
 def test_embeddings_match_forward_path():

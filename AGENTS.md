@@ -108,6 +108,7 @@ colab/
   finish_eval.py      resumable full slice evaluation on a single GPU
   hybrid_eval.py      hybrid fusion scored on the frozen gate by oof CV; saves fusion.json + bank
   hybrid_bank_eval.py same fusion, bank drawn from held-out slices instead of the gate
+  hybrid_routing.py    register routing + abstention, computed from the bank/gate caches (no model)
   build_raid.py       one-time RAID byte-range extractor -> Hub v2/raid_v2.jsonl
   build_news.py       paired clean-news builder -> Hub v2/news_pairs.jsonl (v2 local.jsonl)
 data/example_local.jsonl  schema example for prompt-paired `local.jsonl`
@@ -661,6 +662,13 @@ Four rules are what make the numbers mean anything:
 - Report the share of folds agreeing on each coefficient's **sign**. The fusion gives `det_logit`
   a negative weight with 5/5 fold agreement: the geometry carries the signal and the logit
   survives as a corrector. Stable, but do not read it as "the detector is inverted".
+- Truncation audit (2026-11-04): only 23 of the 1,600 gate rows exceed 512 tokens (all human
+  reviews, max 1,162), so the frozen gate cannot detect head-only scoring — a real deployment
+  hazard whenever a user pastes a long essay. `predict_probs_and_embeddings` now scores contiguous
+  windows and aggregates by token count (`chunk=False` reproduces the old truncation), and
+  `test_chunked_scoring_uses_the_tail` proves the tail is forwarded by counting tokens rather than
+  by comparing probabilities. Note the change moves §7.9's numbers slightly: any cache built
+  before it is pre-chunk and must be invalidated.
 
 Knobs: `DET_ID` (Hub id **or** a local directory), `GATE_REPO`/`GATE_NAME`, `PROBE_TXT`
 (explainer blocks `**N. Title`; `""` skips the transfer stage), `OUT_DIR`, `K_NEIGHBOURS`.
@@ -866,6 +874,7 @@ state, ~4.4–5 GB per push).
 | a fusion feature has a negative coefficient on `det_logit` | the embedding geometry carries the signal and the logit acts as a corrector; sign agreement was 5/5 folds | check sign stability per fold (`hybrid_eval.py` prints it); do not "fix" the sign |
 | k-NN features look suspiciously strong | the gate is prompt-paired, so a row's nearest neighbour is its own AI/human partner — that is topic, not style | never compute vector features with group blocking disabled; `tests/test_hybrid.py` fails if it is |
 | hybrid fusion has better AUROC and FPR@0.5 but reviews TPR@1% collapses | `log_chars` in the feature set; the fusion learns the gate's length confound | keep length out of the feature set; never ship the all-features fusion |
+| a scoring change makes earlier results look wrong | embedding/score caches are pre-change and were never invalidated | compare against the run's own cache timestamp, then delete stale caches (naming them `*.stale.*`) and rebuild |
 | every 150k build flags 60-71% of gate humans at 0.5 while the 50k pilot flags 24.75% | data volume, not steps: 607 / 1,755 / 5,265 steps all land at human mean 0.62-0.68 | the pilot is the release model; the only lever that moved it was `local_jsonl.ai_foundational`, and it trades the AI tail away to get it |
 
 ---
@@ -898,6 +907,13 @@ gates, the four 150k gates, and each diagnosis — is in `CHANGELOG.md`.
 - **Coverage gap that no scorer fixes:** encyclopedic/explainer register. Wikipedia's GBR lead
   scores 0.9695 as AI under every variant tried (detector, GPT-2 fusion, k-NN fusion). Fix is
   paired training data in that register, not a second model.
+- **Chunked scoring landed (2026-11-04):** only 23/1,600 gate rows exceeded 512 tokens, so
+  truncation could not be detected there, but `predict_probs_and_embeddings` now scores long
+  texts in windows (mean chunk logit, token-weighted mean pooled vector) — any embedding cache
+  built before the change is pre-chunk. See §7.8.
+- **Open harness items:** per-register routing and an abstain band, pruning the confounded/dead
+  stylometry features, mean-vs-CLS pooling for k-NN, temperature scaling, and a paraphrase
+  slice for the gate. None needs a pod except the paraphrase one. See CHANGELOG 2026-11-04.
 
 - **Root cause of the gate failure (found 2026-10-31):** `yaful/MAGE` labels 1 = human and
   0 = machine, while the generic `hf:` adapter assumes 1 = AI. `hf:yaful/MAGE` therefore fed

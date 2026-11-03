@@ -31,6 +31,24 @@ AGENTS.md, AGENTS.md is right and this one is stale.
   A/B, and a gate built on a second generator.
 
 
+## 2026-11-04
+
+- **Truncation audit and chunked scoring (2026-11-04).** Tokenising the frozen gate with the
+  release tokenizer shows only 23 of 1,600 rows exceed 512 tokens (all human Yelp reviews; max
+  1,162, p99 555) and no news row does, so the gate cannot detect head-only scoring even though
+  it is a real deployment hazard. `predict_probs_and_embeddings` now folds texts into contiguous
+  windows and aggregates by token count (`chunk=False` keeps the old behaviour), with a unit test
+  that proves the tail is forwarded by counting tokens rather than by comparing probabilities.
+  Consequence: every embedding cache created before this is pre-chunk and must be invalidated
+  before reuse; the §7.9 tables predate it and move only slightly.
+- **Routing and abstention experiment, pruning and temperature tests (in progress).** Same caches,
+  `colab/hybrid_routing.py`: a small policy learns from bank rows which system (detector vs shipped
+  fusion) costs less at the operating threshold, then routes the gate by that policy; disagreement
+  rows become an explicit abstention set instead of a forced call. The same script ablates
+  `log_words` / `sent_mean_words` / `llm_marker_rate` and fits a temperature on the bank's
+  out-of-fold logit. Mean-pooling vs CLS and a paraphrase-hardened gate slice remain open and are
+  recorded as the known gaps rather than silently omitted.
+
 ## 2026-11-03
 
 - **External-bank re-test refutes the gate-fitted hybrid (2026-11-03).** `colab/hybrid_bank_eval.py`

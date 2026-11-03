@@ -87,6 +87,14 @@ def predict_probs(
     return probs
 
 
+def _chunk_windows(ids, window, bos, eos):
+    """Contiguous windows of ``window`` content tokens, each wrapped in the tokenizer specials."""
+    if not ids:
+        return [[bos, eos][:1] + [eos] if bos is not None and eos is not None else [bos] if bos is not None else []]
+    return [[bos, *ids[i : i + window], eos] if bos is not None and eos is not None
+            else ids[i : i + window] for i in range(0, len(ids), window)]
+
+
 def predict_probs_and_embeddings(
     model,
     tokenizer,
@@ -95,12 +103,16 @@ def predict_probs_and_embeddings(
     max_length: int = 512,
     batch_size: int = 16,
     pad_to_max: bool = False,
+    chunk: bool = True,
     desc: str = "embed",
 ):
     """Probabilities plus the pooled representation the classifier head consumes.
 
     One forward pass per batch: the logit is recomputed from the pooled vector instead of
     calling ``forward``, which is bit-equivalent in eval mode (the head dropout is identity).
+    Texts longer than ``max_length`` are scored as contiguous windows and aggregated by
+    token count; without this a long review is judged on its first 512 tokens only, which is a
+    systematic bias the frozen gate happens to expose on 23 of 1,600 rows.
     """
     import torch
 
@@ -110,21 +122,37 @@ def predict_probs_and_embeddings(
     if count == 0:
         return np.zeros(0, dtype=np.float32), np.zeros((0, 0), dtype=np.float32)
 
-    order = sorted(range(count), key=lambda i: len(samples[i].text))
-    starts = range(0, count, batch_size)
+    bos, eos = tokenizer.bos_token_id, tokenizer.eos_token_id
+    window = max(1, max_length - int(bos is not None) - int(eos is not None))
+    encoded = tokenizer(
+        [s.text for s in samples],
+        add_special_tokens=False,
+        truncation=False,
+        return_tensors=None,
+    )["input_ids"]
+    pieces: list[tuple[int, list[int], int]] = []
+    for row, ids in enumerate(encoded):
+        ids = list(ids)
+        windows = _chunk_windows(ids, window, bos, eos)
+        if not chunk:
+            windows = windows[:1]  # truncation: only the first window is ever scored
+        for chunk_ids in windows:
+            pieces.append((row, chunk_ids, max(0, len(chunk_ids) - int(bos is not None) - int(eos is not None))))
+    pieces.sort(key=lambda p: len(p[1]))  # short chunks share batches, keeping padding low
+
+    starts = range(0, len(pieces), batch_size)
     batches = len(starts)
     use_amp = device.type == "cuda"
-    probs = np.zeros(count, dtype=np.float32)
+    logits_sum = np.zeros(count, dtype=np.float64)
+    token_total = np.zeros(count, dtype=np.float64)
     vectors = None
     bar = _progress(batches, desc)
 
     with torch.inference_mode():
         for step, start in enumerate(starts, 1):
-            index = order[start : start + batch_size]
-            enc = tokenizer(
-                [samples[i].text for i in index],
-                truncation=True,
-                max_length=max_length,
+            batch = pieces[start : start + batch_size]
+            enc = tokenizer.pad(
+                {"input_ids": [ids for _, ids, _ in batch]},
                 padding="max_length" if pad_to_max else True,
                 return_tensors="pt",
             )
@@ -136,17 +164,25 @@ def predict_probs_and_embeddings(
                 with torch.autocast(device_type="cuda", enabled=False):
                     pooled = model.encode(**enc).float()
                     logits = model.classifier(model.dropout(pooled)).float()
-            probs[index] = torch.sigmoid(logits).reshape(-1).cpu().numpy()
-            chunk = pooled.float().cpu().numpy()
+            chunk_pooled = pooled.float().cpu().numpy()
+            chunk_logits = logits.reshape(-1).cpu().numpy()
             if vectors is None:
-                vectors = np.zeros((count, chunk.shape[1]), dtype=np.float32)
-            vectors[index] = chunk
+                vectors = np.zeros((count, chunk_pooled.shape[1]), dtype=np.float64)
+            for j, (row, _, weight) in enumerate(batch):
+                w = max(1, weight)
+                logits_sum[row] += w * chunk_logits[j]
+                token_total[row] += w
+                vectors[row] += w * chunk_pooled[j]
             if bar is not None:
                 bar.update(1)
 
     if bar is not None:
         bar.close()
-    return probs, vectors
+    mean_logits = logits_sum / np.clip(token_total, 1e-9, None)
+    probs = 1.0 / (1.0 + np.exp(-mean_logits))
+    assert vectors is not None
+    vectors /= np.clip(token_total, 1e-9, None)[:, None]
+    return probs.astype(np.float32), vectors.astype(np.float32)
 
 
 def evaluate_slices(

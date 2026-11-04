@@ -11,6 +11,17 @@ AGENTS.md, AGENTS.md is right and this one is stale.
 
 ## 2026-11-04
 
+- **Stylometry pruning, mean pooling and the k sweep (2026-11-04).** Dropping `log_words`,
+  `sent_mean_words` and `llm_marker_rate` each improved the out-of-bank gate result slightly (AUROC
+  0.9414 -> 0.9421, bank-threshold catches 458 -> 464 of 800), so all three are removed from
+  `STYLO_NAMES` and the shipped artifact regenerated; `llm_marker_rate` fired on only 2 of the 20
+  frontier texts it was designed to catch. Mean pooling lifts the k-NN block from 0.9102 to 0.9277
+  pooled AUROC at k=8 (k=16: 0.9302, k=32: 0.9317) and reviews TPR@1% from 0.2375 to as much as
+  0.3425, but it still never beats the detector (0.9324 pooled, 0.3850 reviews), so geometry stays
+  diagnostic and out of the shipped set. Temperature scaling fitted on the bank's out-of-fold logit
+  gave T=1.7352 and changed FPR@0.5 from 0.1925 to 0.1925 — a monotone transform cannot change
+  AUROC or a same-data threshold — so it is documented as a measured no-op and kept out of the path.
+- **Chunked scoring (2026-11-04).**
 - **Routing, abstention, pruning, temperature: measured out-of-bank (2026-11-04).**
   `colab/hybrid_routing.py` runs entirely from the bank/gate caches and reports three things. A
   cost-weighted policy (false accusation = 10, miss = 1) learned on the bank rows where the systems'

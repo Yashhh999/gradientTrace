@@ -25,9 +25,11 @@ CONFIG = "configs/pilot.yaml"        # the recipe the release pilot was trained 
 DET_ID = "Yashhh999/gradientTrace-v2-pilot"
 GATE_REPO = "Yashhh999/gradientTrace"
 PROBE_TXT = os.environ.get("PROBE_TXT", "")  # explainer blocks; "" skips the transfer stage
-CACHE = "hybrid_bank_cache.npz"      # slice embeddings, so a rerun costs seconds
+POOLING = os.environ.get("POOLING", "cls")  # "cls" (head pooling) or "mean"
+SUFFIX = "" if POOLING == "cls" else "-" + POOLING
+CACHE = "hybrid_bank_cache%s.npz" % SUFFIX  # slice embeddings, pooling-specific
 ROWS_CACHE = "hybrid_bank_rows.json"   # chosen bank rows, so the ~20 min data build runs once
-GATE_CACHE = "hybrid_gate_cache.npz"   # gate embeddings, so the gate is embedded once
+GATE_CACHE = "hybrid_gate_cache%s.npz" % SUFFIX  # gate embeddings, so the gate is embedded once
 
 
 def repo_dir():
@@ -126,7 +128,7 @@ def pick_bank(bundle):
 
 def embed(model, tok, device, texts, desc):
     samples = [Sample(text=t, label=1, generator="x", source="bank") for t in texts]
-    probs, vectors = predict_probs_and_embeddings(model, tok, samples, device, batch_size=BATCH, desc=desc)
+    probs, vectors = predict_probs_and_embeddings(model, tok, samples, device, batch_size=BATCH, desc=desc, pooling=POOLING)
     return probs.astype(np.float64), vectors.astype(np.float64)
 
 

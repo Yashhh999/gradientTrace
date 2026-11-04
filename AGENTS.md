@@ -742,6 +742,13 @@ never seen.
   scores 0.9695 as AI. That is a data gap (§11), and it is the reason the next real investment is
   paired register coverage, not another fusion.
 
+Mean pooling and the neighbourhood width, measured from the same caches (2026-11-04): pooling the
+whole encoder output instead of taking the CLS token lifts the k-NN block's out-of-bank AUROC from
+0.9102 to 0.9277 at k=8, and larger k helps further (k=32: 0.9317) — but the reviews slice stays
+below the detector's 0.3850 TPR@1% (best 0.3425 at k=32) and pooled AUROC never reaches the
+detector's 0.9324. The pooling question is therefore closed against geometry: better measurement
+of the same bank-relative signal, same ceiling.
+
 Both runs cache what they load (`hybrid_bank_rows.json`, `hybrid_bank_cache.npz`,
 `hybrid_gate_cache.npz` — all gitignored), so re-scoring the fusion costs seconds; the ~19 minute
 data build is the only expensive step and it runs once.

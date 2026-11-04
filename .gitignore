@@ -21,3 +21,5 @@ hybrid_gate_features.npz
 hybrid_bank_rows.json
 hybrid_gate_cache.npz
 gate_baselines.json
+hybrid_bank_cache-mean.npz
+hybrid_gate_cache-mean.npz

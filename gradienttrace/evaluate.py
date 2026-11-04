@@ -104,6 +104,7 @@ def predict_probs_and_embeddings(
     batch_size: int = 16,
     pad_to_max: bool = False,
     chunk: bool = True,
+    pooling: str = "auto",
     desc: str = "embed",
 ):
     """Probabilities plus the pooled representation the classifier head consumes.
@@ -113,8 +114,17 @@ def predict_probs_and_embeddings(
     Texts longer than ``max_length`` are scored as contiguous windows and aggregated by
     token count; without this a long review is judged on its first 512 tokens only, which is a
     systematic bias the frozen gate happens to expose on 23 of 1,600 rows.
+
+    ``pooling`` selects which summary of the encoder output is returned as the embedding:
+    ``"auto"`` uses the model's own pooling (what the classifier head consumes, default), and
+    ``"mean"`` returns the attention-masked mean. The probability is unaffected either way; the
+    option exists because mean pooling usually carries more aggregate style than CLS for
+    neighbour searches, and the comparison has to be measured, not assumed.
     """
     import torch
+
+    if pooling not in ("auto", "cls", "mean"):
+        raise ValueError(f"pooling must be 'auto', 'cls' or 'mean', got {pooling!r}")
 
     model.eval()
     device = torch.device(device)
@@ -157,9 +167,26 @@ def predict_probs_and_embeddings(
                 return_tensors="pt",
             )
             enc = {k: v.to(device) for k, v in enc.items()}
+            encoder_inputs = {k: enc[k] for k in ("input_ids", "attention_mask") if k in enc}
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-                pooled = model.encode(**enc)
-                logits = model.classifier(model.dropout(pooled)).float()
+                hidden = model.encoder(**encoder_inputs).last_hidden_state
+                head_pooled = model.pool(hidden, enc["attention_mask"])
+                logits = model.classifier(model.dropout(head_pooled)).float()
+                if pooling == "mean":
+                    mask = enc["attention_mask"].unsqueeze(-1).to(hidden.dtype)
+                    pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+                else:
+                    pooled = head_pooled
+            if use_amp and not torch.isfinite(logits).all():
+                with torch.autocast(device_type="cuda", enabled=False):
+                    hidden = model.encoder(**encoder_inputs).last_hidden_state
+                    head_pooled = model.pool(hidden, enc["attention_mask"])
+                    logits = model.classifier(model.dropout(head_pooled)).float()
+                    if pooling == "mean":
+                        mask = enc["attention_mask"].unsqueeze(-1).to(hidden.dtype)
+                        pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+                    else:
+                        pooled = head_pooled
             if use_amp and not torch.isfinite(logits).all():
                 with torch.autocast(device_type="cuda", enabled=False):
                     pooled = model.encode(**enc).float()

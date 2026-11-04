@@ -130,20 +130,6 @@ def main():
         print("  %-14s %s det %.4f fusion %.4f routed %.4f P(route)=%.2f%s"
               % (key, "AI  " if label else "HUM ", probe_probs[i], fused_probe[i], routed_probe[i],
                  policy_probe[i], "  -> ABSTAIN" if probe_disagree[i] else ""))
-    print("\n=== stylometry pruning (out-of-bank; bank-calibrated thresholds) ===")
-    for tag, drop in (("full", []), ("-log_words", ["log_words"]), ("-sent_mean_words", ["sent_mean_words"]),
-                      ("-llm_marker_rate", ["llm_marker_rate"]), ("-length-pair", ["log_words", "sent_mean_words"]),
-                      ("-all three", ["log_words", "sent_mean_words", "llm_marker_rate"])):
-        cols = [n for n in SHIPPED if n not in drop]
-        oof_p, _, f_p, _ = oof_fusion(cols, X_bank, emb_b, lab_b, grp_b, stratify(lab_b, dom_b))
-        _, thr_p = operating(oof_p, lab_b, 0.01)
-        fused_p = f_p.predict(X_gate[:, [SHIPPED.index(n) for n in cols]])
-        m_p = binary_detection_metrics(y_gate, fused_p)
-        fpr_p = float((fused_p[y_gate == 0] >= thr_p).mean())
-        caught_p = int((fused_p >= thr_p)[y_gate == 1].sum())
-        print("  %-16s AUROC %.4f  TPR@1%% %.4f  bank-thr %.4f catches %d/800 (gate FPR %.4f)"
-              % (tag, m_p["auroc"], m_p["tpr_at_fpr_0.01"], thr_p, caught_p, fpr_p))
-
     print("\n=== temperature scaling of the detector logit (fit on the bank) ===")
     from scipy.optimize import minimize_scalar
 

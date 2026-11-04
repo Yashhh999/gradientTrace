@@ -133,6 +133,28 @@ def test_chunked_scoring_uses_the_tail():
     assert chunked_tokens == full_tokens + 2 * windows, (chunked_tokens, full_tokens, windows)
 
 
+def test_mean_pooling_keeps_the_score_and_changes_the_vector():
+    if torch is None:
+        print("skip: torch not installed")
+        return
+    from gradienttrace.data import Sample
+    from gradienttrace.evaluate import predict_probs_and_embeddings
+
+    model, tok = tiny_detector()
+    device = torch.device("cpu")
+    samples = [Sample(text=t, label=1, generator="x", source="test") for t in texts(8)]
+    p_cls, v_cls = predict_probs_and_embeddings(model, tok, samples, device, batch_size=5)
+    p_mean, v_mean = predict_probs_and_embeddings(model, tok, samples, device, batch_size=5, pooling="mean")
+    assert np.allclose(p_cls, p_mean, atol=1e-6), "pooling must not change the score"
+    assert v_mean.shape == v_cls.shape and np.isfinite(v_mean).all()
+    assert np.abs(v_mean - v_cls).max() > 1e-4, "mean and CLS summaries should differ"
+    try:
+        predict_probs_and_embeddings(model, tok, samples, device, pooling="nope")
+    except ValueError:
+        return
+    raise AssertionError("an unknown pooling kind must raise")
+
+
 def test_embeddings_match_forward_path():
     if torch is None:
         print("skip: torch not installed")
@@ -182,7 +204,7 @@ def test_save_and_score_roundtrip():
         model, tok, [Sample(text=t, label=1, generator="x", source="gate") for t in gate], device, batch_size=6
     )
     X_static = build_static(probs, gate)
-    names = ["det_logit", "log_words", "ttr", "knn_margin", "centroid_margin"]
+    names = ["det_logit", "flesch", "ttr", "knn_margin", "centroid_margin"]
     oof, _, fusion, _ = oof_fusion(names, X_static, embeddings.astype(np.float64), labels, groups, stratify(labels, genres))
     fusion.threshold = 0.6
 
@@ -202,7 +224,7 @@ def test_save_and_score_roundtrip():
         assert Fusion.from_json(fusion.to_json()).names == names
 
         # the shipped fusion has no vector columns, so it must work without touching the bank
-        bankless_names = ["det_logit", "log_words", "ttr"]
+        bankless_names = ["det_logit", "flesch", "ttr"]
         _, _, bankless, _ = oof_fusion(bankless_names, X_static, embeddings.astype(np.float64),
                                        labels, groups, stratify(labels, genres))
         bankless.threshold = 0.5

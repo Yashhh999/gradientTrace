@@ -45,21 +45,14 @@ AUXILIARIES = frozenset(
 CONNECTIVES = frozenset(
     "however moreover furthermore therefore thus consequently additionally meanwhile nevertheless".split()
 )
-# Register tells of instruction-tuned prose. Brittle by design — a writer defeats it by deleting
-# a word — which is why it is measured as one block and never trusted alone.
-LLM_MARKERS = frozenset(
-    """delve tapestry landscape crucial pivotal seamless robust holistic nuanced underscores
-    multifaceted realm navigate unlock elevate foster harness myriad vibrant testament
-    showcase comprehensive""".split()
-)
 
 STYLO_NAMES = [
-    "log_words", "mean_word_len", "long_word_rate", "syll_per_word", "flesch",
+    "mean_word_len", "long_word_rate", "syll_per_word", "flesch",
     "function_rate", "pronoun_rate", "determiner_rate", "preposition_rate", "conjunction_rate",
-    "auxiliary_rate", "connective_rate", "llm_marker_rate", "digit_rate", "uppercase_ratio",
+    "auxiliary_rate", "connective_rate", "digit_rate", "uppercase_ratio",
     "allcaps_rate", "contraction_rate", "comma_rate", "period_rate", "colon_rate", "quote_rate",
     "parens_rate", "dash_rate", "ellipsis_rate", "exclaim_rate", "question_rate",
-    "markdown_rate", "newline_rate", "sent_mean_words", "sent_std_words", "ttr", "hapax_rate",
+    "markdown_rate", "newline_rate", "sent_std_words", "ttr", "hapax_rate",
     "trigram_repeat",
 ]
 VECTOR_NAMES = ["knn_human", "knn_ai", "knn_margin", "knn_human_frac", "centroid_margin"]
@@ -111,7 +104,6 @@ def stylometry(text: str) -> dict[str, float]:
     alpha = sum(1 for c in text if c.isalpha()) or 1
 
     return {
-        "log_words": math.log1p(n),
         "mean_word_len": sum(len(w) for w in words) / n,
         "long_word_rate": rate(sum(1 for w in words if len(w) > 6)),
         "syll_per_word": syllables / n,
@@ -123,7 +115,6 @@ def stylometry(text: str) -> dict[str, float]:
         "conjunction_rate": rate(in_lines(CONJUNCTIONS)),
         "auxiliary_rate": rate(in_lines(AUXILIARIES)),
         "connective_rate": rate(in_lines(CONNECTIVES)),
-        "llm_marker_rate": rate(in_lines(LLM_MARKERS)),
         "digit_rate": rate(sum(1 for c in text if c.isdigit())),
         "uppercase_ratio": sum(1 for c in text if c.isupper()) / alpha,
         "allcaps_rate": rate(sum(1 for w in words if len(w) > 1 and w.isupper())),
@@ -141,7 +132,6 @@ def stylometry(text: str) -> dict[str, float]:
             sum(1 for line in text.splitlines() if re.match(r"^\s*(?:[-*•]|\d+\.|#+|\*\*)", line))
         ),
         "newline_rate": rate(text.count("\n")),
-        "sent_mean_words": float(np.mean(sent_lengths)),
         "sent_std_words": float(np.std(sent_lengths)),
         "ttr": len(unique) / n,
         "hapax_rate": rate(sum(1 for c in counts.values() if c == 1)),

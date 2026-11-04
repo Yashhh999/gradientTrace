@@ -168,7 +168,7 @@ def main():
     probe_texts = [t for _, t in rows]
     full, det_probe, made = scorer.features(probe_texts)
     fused = ship_fusion.predict(full[:, [made.index(n) for n in ship_fusion.names]])
-    marker_col = made.index("llm_marker_rate")
+    marker_col = made.index("flesch")
     knn_col = made.index("knn_margin") if "knn_margin" in made else None
     print("  operating points — detector TPR@1%% %.4f (thr %.4f) | ship fusion TPR@1%% %.4f (thr %.4f)"
           % (tpr1, thr1, operating(ship_oof, y, 0.01)[0], ship_thr))
@@ -176,7 +176,7 @@ def main():
           % (int((det_probe >= thr1).sum()), len(rows), int((fused >= ship_thr).sum()), len(rows)))
     print("  flagged above 0.5: detector %d/%d, fusion %d/%d"
           % (int((det_probe >= 0.5).sum()), len(rows), int((fused >= 0.5).sum()), len(rows)))
-    head = "  %-14s %6s %8s %8s %9s" % ("text", "chars", "det_p", "hyb_p", "llm_rate")
+    head = "  %-14s %6s %8s %8s %9s" % ("text", "chars", "det_p", "hyb_p", "flesch")
     print(head + ("" if knn_col is None else " %9s" % "knn_marg"))
     for i, (key, text) in enumerate(rows):
         line = "  %-14s %6d %8.4f %8.4f %9.4f" % (key, len(text), det_probe[i], fused[i], full[i, marker_col])

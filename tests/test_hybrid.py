@@ -30,7 +30,7 @@ def test_stylometry_complete_and_stable():
     assert all(np.isfinite(list(a.values()))), "non-finite feature"
     assert a == b, "not deterministic"
     assert all(v == 0.0 for v in stylometry("").values())
-    assert stylometry(AI)["llm_marker_rate"] > stylometry(HUMAN)["llm_marker_rate"]
+    assert stylometry(AI)["connective_rate"] > stylometry(HUMAN)["connective_rate"]
 
 
 def test_vector_features_block_pairs():

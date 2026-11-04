@@ -539,6 +539,17 @@ moved the whole 150k human distribution up; the 50k pilot remains the release mo
 data-mix search is closed. Internal slices for ailow10: val 0.9948 / 0.907, in-domain 0.9949,
 OOD 0.9993 / 0.990, humanized 0.9975 / 0.951, poetry 0.9507 / 0.435.
 
+Fused gate submission (`v2-pilot-stylo`, 2026-11-04): the shipped fusion artifact went through the
+same cell as any detector, so the report is produced by `external_gate.py` rather than by my
+scripts. Gate-fitted artifact (31 features fit out-of-fold on the gate itself): news 0.9784 /
+0.7825 / 0.0825, reviews 0.9733 / 0.4625 / 0.0900, pooled 0.9759 / 0.6000 / 0.0862, pairwise
+0.9900, human mean 0.1189 vs the pilot's 0.2131. That number is an in-bank measurement, not a
+deployment claim. **The deployable artifact** (`v2-pilot-stylo-ext`, fit on held-out slices only,
+threshold from the bank) scored news 0.9491 / 0.8175 / 0.0800, reviews 0.9498 / 0.3800 / 0.0425,
+pooled 0.9421 / 0.5850 / 0.0612, pairwise 0.9600 — against the pilot's 0.9487 / 0.7925, 0.9360 /
+0.3650, 0.9323 / 0.5887. Clears all four bars: pooled FPR@0.5 down 68%, news TPR@1% up, reviews
+clearly better, pairwise unchanged. Use the `-ext` report for any launch copy.
+
 Gate caveat: the reviews humans are Yelp and RAID's reviews humans are also Yelp, so the
 reviews slice is source-seen for v2 models; news (ag_news vs RAID's BBC News) is the cleaner
 human-source slice. The generator Qwen2.5-3B-Instruct is unseen after `qwen` is held out.
@@ -932,10 +943,11 @@ gates, the four 150k gates, and each diagnosis — is in `CHANGELOG.md`.
   explainers return to 1/20, while stylometry holds: pooled AUROC **0.9422**, news TPR@1%
   **0.8050**, news FPR@0.5 **0.0825** (from 0.2475), reviews AUROC **0.9494** / FPR@0.5 **0.0450**.
   **Shipped: `SHIP_SET="det + stylometry"`** — no bank needed at inference.
-- **Not yet done:** the fused model has never been through `colab/external_gate.py` as a deployed
-  detector (the §7.9 numbers come from re-scoring the frozen gate with the shipped features), and
-  `SHIP_SET` has not been validated on a second generator. Both precede any launch claim that
-  uses fusion numbers rather than the pilot's recorded gate row.
+- **Not yet done:** `SHIP_SET` has not been validated on a second generator. The fused model has
+  now been through `colab/external_gate.py` as a deployed detector (`v2-pilot-stylo`, in-bank) and
+  its deployable twin (`v2-pilot-stylo-ext`, bank-fitted, §7.5), so fusion numbers can be quoted
+  from those gate reports; until a second generator exists, quote the `-ext` report, not the
+  `hybrid_eval`/`hybrid_bank_eval` re-scores.
 - **Coverage gap that no scorer fixes:** encyclopedic/explainer register. Wikipedia's GBR lead
   scores 0.9695 as AI under every variant tried (detector, GPT-2 fusion, k-NN fusion). Fix is
   paired training data in that register, not a second model.

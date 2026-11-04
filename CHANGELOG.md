@@ -11,6 +11,17 @@ AGENTS.md, AGENTS.md is right and this one is stale.
 
 ## 2026-11-04
 
+- **Fused gate submission (2026-11-04).** `colab/external_gate.py` gained a `FUSION_DIR` knob so a
+  saved fusion can go through the exact acceptance harness, plus a restore path that recovers the
+  frozen dataset from the Hub whenever it is missing (previously restoring only on push, which sent
+  a local PUSH=False run into regeneration on CPU). Two runs: the gate-fitted artifact
+  (`v2-pilot-stylo`) scored pooled AUROC 0.9759 / TPR@1% 0.6000 / FPR@0.5 0.0862 and pairwise 0.9900,
+  which reproduces the in-bank numbers, so it is an in-bank measurement and not a deployment claim.
+  The artifact this project will ship (`v2-pilot-stylo-ext`, fit on held-out slices only) scored
+  news 0.9491 / 0.8175 / 0.0800 and reviews 0.9498 / 0.3800 / 0.0425, pooled 0.9421 / 0.5850 /
+  0.0612, pairwise 0.9600, against the pilot's 0.9487 / 0.7925, 0.9360 / 0.3650, 0.9323 /
+  0.5887. Fitted on the bank and validated by the gate cell, both sets now clear all four bars.
+
 - **Stylometry pruning, mean pooling and the k sweep (2026-11-04).** Dropping `log_words`,
   `sent_mean_words` and `llm_marker_rate` each improved the out-of-bank gate result slightly (AUROC
   0.9414 -> 0.9421, bank-threshold catches 458 -> 464 of 800), so all three are removed from

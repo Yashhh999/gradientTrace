@@ -109,6 +109,7 @@ colab/
   hybrid_eval.py      hybrid fusion scored on the frozen gate by oof CV; saves fusion.json + bank
   hybrid_bank_eval.py same fusion, bank drawn from held-out slices instead of the gate
   hybrid_routing.py    register routing + abstention, computed from the bank/gate caches (no model)
+  fit_external.py     fit the shipped fusion on held-out slices only, so the gate cell can accept it
   build_raid.py       one-time RAID byte-range extractor -> Hub v2/raid_v2.jsonl
   build_news.py       paired clean-news builder -> Hub v2/news_pairs.jsonl (v2 local.jsonl)
 data/example_local.jsonl  schema example for prompt-paired `local.jsonl`

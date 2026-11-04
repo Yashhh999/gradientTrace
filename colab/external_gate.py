@@ -5,8 +5,8 @@
 # Headline numbers: FPR/TPR at a human-calibrated 1% threshold, AUROC, pairwise accuracy and
 # a length-bucket breakdown. The frozen dataset is pushed once and reused by later models,
 # so v2 is scored on exactly the same text.
-MODEL_ID = "Yashhh999/gradientTrace"    # detector under test
-MODEL_LABEL = "v1"
+MODEL_ID = "Yashhh999/gradientTrace-v2-pilot"  # detector under test
+MODEL_LABEL = "v2-pilot-stylo"
 GEN_MODEL = "Qwen/Qwen2.5-3B-Instruct"  # unseen generator; 7B is an option on Kaggle 2x T4
 GATE_REPO = "Yashhh999/gradientTrace"   # where the frozen gate dataset lives
 GATE_NAME = "external_gate_v1"
@@ -16,7 +16,8 @@ TEMPERATURE = 0.8
 TOP_P = 0.9
 REGENERATE = False    # True rebuilds and re-pushes the frozen JSONL
 BATCH_SIZE = 32       # detector eval; an OOM halves it
-PUSH = True
+PUSH = False
+FUSION_DIR = "C:/Users/gupta/models/pilot/hybrid_fusion"  # path to a saved fusion (gradienttrace.hybrid.save_fusion); "" = raw detector
 
 if MODEL_ID.rstrip("/") == GATE_REPO and MODEL_LABEL != "v1":
     raise SystemExit(
@@ -36,7 +37,9 @@ import sys
 import time
 
 T0 = time.time()
-REPO_DIR = "/kaggle/working/gradientTrace" if os.path.isdir("/kaggle/working") else "/content/gradientTrace"
+REPO_DIR = ("/kaggle/working/gradientTrace" if os.path.isdir("/kaggle/working")
+            else "/content/gradientTrace" if os.path.isdir("/content/gradientTrace")
+            else os.getcwd())
 
 
 def stage(message):
@@ -58,11 +61,13 @@ if not token:
         token = userdata.get("HF_TOKEN") or ""
     except Exception as exc:
         print("[gate] Colab secret unavailable:", exc, flush=True)
-if not token:
+if not token and (PUSH or REGENERATE):
     raise SystemExit(
         "[gate] HF_TOKEN missing. Kaggle: Add-ons > Secrets, add HF_TOKEN (write scope) and "
         "enable it for this notebook; Colab: key icon in the left sidebar. Then re-run."
     )
+if not token:
+    print("[gate] no HF_TOKEN; public reads only (no push)", flush=True)
 os.environ["HF_TOKEN"] = token
 print("[gate] HF_TOKEN present (value not printed)", flush=True)
 
@@ -116,11 +121,11 @@ else:
 import torch  # noqa: E402  (only after the dependency check)
 
 if not torch.cuda.is_available():
-    raise SystemExit("[gate] no GPU: Runtime > Change runtime type > T4 GPU, then re-run")
+    print("[gate] no GPU; continuing on CPU (correct, just slower)", flush=True)
 import transformers  # noqa: E402
 
 print(
-    f"[gate] GPU {torch.cuda.get_device_name(0)} | torch {torch.__version__}"
+    f"[gate] {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'} | torch {torch.__version__}"
     f" | transformers {transformers.__version__}",
     flush=True,
 )
@@ -135,6 +140,7 @@ from sklearn.metrics import roc_auc_score, roc_curve  # noqa: E402
 
 from gradienttrace.config import load_config  # noqa: E402
 from gradienttrace.data import Sample, norm_text  # noqa: E402
+from gradienttrace.hybrid import HybridScorer  # noqa: E402
 from gradienttrace.evaluate import load_model_and_tokenizer, predict_probs  # noqa: E402
 from gradienttrace.runtime import detect_runtime, resolve_device  # noqa: E402
 
@@ -437,6 +443,8 @@ def score(batch_size):
         )
         for rec in records
     ]
+    if FUSION_DIR:
+        return score_fused(samples, batch_size)
     try:
         return predict_probs(
             detector,
@@ -454,6 +462,23 @@ def score(batch_size):
             raise
         print(f"[gate] OOM at batch {batch_size}; retrying at {batch_size // 2}", flush=True)
         return score(batch_size // 2)
+
+
+_scorer = None
+
+
+def score_fused(samples, batch_size):
+    """Fused probability from the same forward pass: the gate's detector probabilities come
+    from HybridScorer, so a fused gate and a plain gate score the identical model and text.
+    """
+    global _scorer
+    if _scorer is None:
+        _scorer = HybridScorer(MODEL_ID, FUSION_DIR, device=device, batch_size=batch_size,
+                               detector=(detector, det_tok))
+        print(f"[gate] fused scorer: {len(_scorer.fusion.names)} features "
+              f"from {FUSION_DIR}", flush=True)
+    _scorer.batch_size = batch_size
+    return _scorer.score([s.text for s in samples])["fused"]
 
 
 probs = score(BATCH_SIZE)
@@ -546,6 +571,7 @@ def genre_metrics(recs, ps):
 report = {
     "model": MODEL_ID,
     "model_label": MODEL_LABEL,
+    "fusion": FUSION_DIR or None,
     "gate": GATE_NAME,
     "generator_model": GEN_MODEL,
     "runtime": asdict(runtime),

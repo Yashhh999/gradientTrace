@@ -6,7 +6,7 @@
 # a length-bucket breakdown. The frozen dataset is pushed once and reused by later models,
 # so v2 is scored on exactly the same text.
 MODEL_ID = "Yashhh999/gradientTrace-v2-pilot"  # detector under test
-MODEL_LABEL = "v2-pilot-stylo"
+MODEL_LABEL = "v2-pilot"
 GEN_MODEL = "Qwen/Qwen2.5-3B-Instruct"  # unseen generator; 7B is an option on Kaggle 2x T4
 GATE_REPO = "Yashhh999/gradientTrace"   # where the frozen gate dataset lives
 GATE_NAME = "external_gate_v1"
@@ -16,8 +16,8 @@ TEMPERATURE = 0.8
 TOP_P = 0.9
 REGENERATE = False    # True rebuilds and re-pushes the frozen JSONL
 BATCH_SIZE = 32       # detector eval; an OOM halves it
-PUSH = False
-FUSION_DIR = "C:/Users/gupta/models/pilot/hybrid_fusion"  # path to a saved fusion (gradienttrace.hybrid.save_fusion); "" = raw detector
+PUSH = True
+FUSION_DIR = os.environ.get("FUSION_DIR", "")  # path to a saved fusion (gradienttrace.hybrid.save_fusion); "" = raw detector
 
 if MODEL_ID.rstrip("/") == GATE_REPO and MODEL_LABEL != "v1":
     raise SystemExit(
@@ -189,12 +189,12 @@ if PUSH:
 
 if REGENERATE and gate_path.is_file():
     gate_path.unlink()
-if PUSH and not REGENERATE and not gate_path.is_file():
+if not REGENERATE and not gate_path.is_file():
     try:  # reuse the frozen dataset instead of paying for generation again
         from huggingface_hub import hf_hub_download
 
         fetched = hf_hub_download(
-            repo_id=GATE_REPO, filename=f"{GATE_NAME}.jsonl", token=os.environ["HF_TOKEN"]
+            repo_id=GATE_REPO, filename=f"{GATE_NAME}.jsonl", token=token or None
         )
         gate_path.write_text(Path(fetched).read_text(encoding="utf-8"), encoding="utf-8")
         print("[gate] restored the frozen gate dataset from the Hub", flush=True)

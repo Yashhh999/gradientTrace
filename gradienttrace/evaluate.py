@@ -249,20 +249,27 @@ def evaluate_slices(
 
 def load_model_and_tokenizer(model_path: str):
     path = Path(model_path)
-    if path.is_dir() and not (path / "config.json").exists():
-        checkpoints = sorted(
-            path.glob("checkpoint-*"), key=lambda p: int(p.name.rsplit("-", 1)[-1])
-        )
-        if checkpoints:
-            LOG.info("no model at %s; using latest checkpoint %s", path, checkpoints[-1])
-            path = checkpoints[-1]
-        else:
-            raise FileNotFoundError(f"{path} has no config.json and no checkpoint-* directories")
-    model = AIDetector.from_pretrained(str(path))
+    if path.is_dir():
+        if not (path / "config.json").exists():
+            checkpoints = sorted(
+                path.glob("checkpoint-*"), key=lambda p: int(p.name.rsplit("-", 1)[-1])
+            )
+            if checkpoints:
+                LOG.info("no model at %s; using latest checkpoint %s", path, checkpoints[-1])
+                path = checkpoints[-1]
+            else:
+                raise FileNotFoundError(f"{path} has no config.json and no checkpoint-* directories")
+        # A local directory is free to round-trip through Path on any platform.
+        source = str(path)
+    else:
+        # A Hub id must reach from_pretrained unchanged: on Windows str(Path("org/name"))
+        # turns the slash into a backslash and the lookup then fails.
+        source = model_path
+    model = AIDetector.from_pretrained(source)
     try:
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(str(path))
+        tokenizer = AutoTokenizer.from_pretrained(source)
     except Exception:
         tokenizer = build_tokenizer(getattr(model.config, "backbone_name", "microsoft/deberta-v3-large"))
     return model, tokenizer

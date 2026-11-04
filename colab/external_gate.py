@@ -5,6 +5,7 @@
 # Headline numbers: FPR/TPR at a human-calibrated 1% threshold, AUROC, pairwise accuracy and
 # a length-bucket breakdown. The frozen dataset is pushed once and reused by later models,
 # so v2 is scored on exactly the same text.
+import os
 MODEL_ID = "Yashhh999/gradientTrace-v2-pilot"  # detector under test
 MODEL_LABEL = "v2-pilot"
 GEN_MODEL = "Qwen/Qwen2.5-3B-Instruct"  # unseen generator; 7B is an option on Kaggle 2x T4
@@ -29,7 +30,6 @@ if MODEL_ID.rstrip("/") == GATE_REPO and MODEL_LABEL != "v1":
 import importlib.util
 import json
 import logging
-import os
 import re
 import socket
 import subprocess
